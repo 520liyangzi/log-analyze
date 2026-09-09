@@ -50,3 +50,7 @@
 - 终端启动 API 拒绝来自其他 Origin 的请求。
 
 本地 Linux 已通过以上测试；CI 配置在 Windows/Linux × Python 3.10/3.12 上安装依赖并执行。没有调用真实 Claude 或公司内部 Agent；不声明已经验证这些程序的登录、授权及版本差异。未执行浏览器截图/交互测试。
+
+## v1.2 样例适配
+
+新增 4 个格式/流程回归用例，总计 23 项：含下划线 namespace/Pod/service 拆分，结构化字段/两种日期写法，HTTP 200 下的多类型异步错误与清单核对，以及旧解析器提示。实际附件的 16 文件、62 记录全部回读核验通过，详情见 [SAMPLE_VALIDATION.md](SAMPLE_VALIDATION.md)。

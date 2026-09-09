@@ -62,7 +62,7 @@ async function refreshDatasets(selectId) {
   $('#dataset').innerHTML = ready.length ? ready.map(d => `<option value="${d.id}">${escapeHTML(d.name)}</option>`).join('') : '<option value="">尚未导入日志包</option>';
   $('#dataset').value = state.dataset;
   const current = ready.find(d => d.id === state.dataset);
-  $('#datasetInfo').textContent = current ? `${number(current.files)} 份日志文件 · ${number(current.records)} 条记录` : '上传外层 ZIP，自动检索所有节点。';
+  $('#datasetInfo').textContent = current ? `${number(current.files)} 份日志文件 · ${number(current.records)} 条记录${current.audit?.manifest_checked ? ' · 清单缺失 '+number(current.audit.missing_count)+' 份' : ''}` : '上传外层 ZIP，自动检索所有节点。';
   const pending = datasets.find(d => d.state === 'importing');
   const failed = datasets.find(d => d.state === 'failed');
   const status = $('#importStatus');
@@ -92,7 +92,8 @@ function updateFilters() {
   const candidates = state.files.filter(f => !$('#node').value || f.node === $('#node').value);
   // Encode namespace separately so identical pod names in different namespaces stay distinct.
   options('pod',candidates.map(f => f.namespace + '/' + f.pod),'全部 Pod');
-  options('kind',candidates.filter(f => !$('#pod').value || f.namespace + '/' + f.pod === $('#pod').value).map(f => f.kind),'全部类型');
+  options('service',candidates.filter(f => !$('#pod').value || f.namespace + '/' + f.pod === $('#pod').value).map(f => f.service),'全部服务');
+  options('kind',candidates.filter(f => !$('#pod').value || f.namespace + '/' + f.pod === $('#pod').value).filter(f => !$('#service').value || f.service === $('#service').value).map(f => f.kind),'全部类型');
   $('#scopeText').textContent = `当前范围：${$('#node').value || '全部节点'} · ${$('#pod').value || '全部 Pod'} · ${$('#kind').value || '全部日志'}`;
 }
 function searchParams() {
@@ -104,7 +105,17 @@ function searchParams() {
 function rowHTML(row, keyword, timeline=false) {
   state.rows.set(row.id,row);
   const error = row.status >= 400 || ['ERROR','FATAL'].includes(row.level);
-  return `<article class="log-row"><div class="log-meta"><span class="log-time">${escapeHTML(row.time || '未识别时间')}</span><span class="badge ${error ? 'error' : row.level === 'WARN' ? 'warn' : ''}">${escapeHTML(row.level || 'RAW')}</span>${row.status ? `<span class="badge ${row.status>=400?'error':'success'}">${row.status}</span>`:''}<span class="log-pod">${escapeHTML(row.pod)}</span><span class="log-kind">${escapeHTML(row.filename)}</span>${row.duration!=null?`<span>${number(row.duration)} ms</span>`:''}<span class="log-number">L${row.line}${row.end_line>row.line?'–'+row.end_line:''}</span></div><pre class="log-content ${error?'is-error':''}">${highlight(row.raw,keyword)}</pre><p class="source-path"><span>来源</span>${escapeHTML(row.source)}</p><div class="log-actions"><button data-action="context" data-id="${row.id}">查看上下文</button><button data-action="verify" data-id="${row.id}">核验原始压缩包</button>${row.ts!=null?`<button data-action="correlate" data-id="${row.id}">同 Pod 相邻日志 →</button>`:''}${row.trace && !timeline?`<button data-action="trace" data-id="${row.id}">追踪流水号</button>`:''}<button data-action="copy" data-id="${row.id}">复制原文</button><span class="thread-label">${escapeHTML(row.node)}${row.thread?' · '+escapeHTML(row.thread):''}</span></div></article>`;
+  return `<article class="log-row"><div class="log-meta"><span class="log-time">${escapeHTML(row.time || '未识别时间')}</span><span class="badge ${error ? 'error' : row.level === 'WARN' ? 'warn' : ''}">${escapeHTML(row.level || 'RAW')}</span>${row.status ? `<span class="badge ${row.status>=400?'error':'success'}">${row.status}</span>`:''}<span class="log-pod">${escapeHTML(row.pod)}</span><span class="log-kind">${escapeHTML(row.filename)}</span>${row.duration!=null?`<span>${number(row.duration)} ms</span>`:''}<span class="log-number">L${row.line}${row.end_line>row.line?'–'+row.end_line:''}</span></div><pre class="log-content ${error?'is-error':''}">${highlight(row.raw,keyword)}</pre>${structuredRow(row,timeline)}<p class="source-path"><span>来源</span>${escapeHTML(row.source)}</p><div class="log-actions"><button data-action="context" data-id="${row.id}">查看上下文</button><button data-action="verify" data-id="${row.id}">核验原始压缩包</button>${row.ts!=null?`<button data-action="correlate" data-id="${row.id}">同 Pod 相邻日志 →</button>`:''}${row.trace && !timeline?`<button data-action="trace" data-id="${row.id}">追踪流水号</button>`:''}<button data-action="copy" data-id="${row.id}">复制原文</button><span class="thread-label">${escapeHTML(row.node)}${row.thread?' · '+escapeHTML(row.thread):''}</span></div></article>`;
+}
+function structuredRow(row,timeline) {
+  const fields=[['TraceID',row.trace],['RouteID',row.route_id],['RequestId',row.request_id],['线程编号',row.thread_id],['响应字节',row.response_size],['WSF 模块',row.module],['代码位置',row.code_file?`${row.code_file}:${row.code_line ?? ''} · ${row.code_method || ''}`:row.logger?`${row.logger}:${row.code_line ?? ''}`:'']];
+  const tags=fields.filter(([,v])=>v!==''&&v!=null).map(([k,v])=>`<span><b>${k}</b> ${escapeHTML(v)}</span>`).join('');
+  let association='';const anchor=state.correlation?.row;
+  if(anchor&&!timeline){
+    const sameScope=anchor.node===row.node&&anchor.namespace===row.namespace&&anchor.pod===row.pod;
+    association=anchor.trace&&row.trace===anchor.trace?'同流水号':sameScope&&anchor.thread&&row.thread===anchor.thread?'同线程候选':sameScope?'相邻时间候选':'其他来源';
+  }
+  return `<div class="parsed-fields">${tags}${association?`<span class="badge">${association}</span>`:''}${row.route_id||row.request_id?`<button class="text-button" data-action="request-key" data-id="${row.id}">按请求标识搜索 →</button>`:''}</div>`;
 }
 function metrics(summary, trace=false) {
   return `<div class="metric-grid"><div class="metric"><span class="metric-label">${trace?'流程记录':'匹配日志'} <span>≡</span></span><span class="metric-value">${number(summary.total)}<small>条</small></span></div><div class="metric"><span class="metric-label">命中节点 <span>▦</span></span><span class="metric-value">${number(summary.nodes)}<small>Node / ${number(summary.pods)} Pod</small></span></div><div class="metric"><span class="metric-label">来源文件 <span>▤</span></span><span class="metric-value">${number(summary.files)}<small>份</small></span></div><div class="metric error"><span class="metric-label">异常记录 <span>!</span></span><span class="metric-value">${number(summary.errors)}<small>ERROR / HTTP ≥400</small></span></div></div>`;
@@ -146,15 +157,14 @@ async function runTrace(page=1,reuse=false) {
 function localInput(ms) { return new Date(ms + 8*3600000).toISOString().slice(0,23); }
 function correlationBanner(row, windowSeconds, sameThread) {
   $('#correlation').hidden=false;
-  $('#correlation').innerHTML=`候选关联：${escapeHTML(row.pod)} · ${escapeHTML(row.time)} 前后 ${windowSeconds} 秒${sameThread?' · 同线程':''}。时间与线程可能被复用，请结合流水号确认。<button data-action="toggle-thread">${sameThread?'取消线程限制':'限定同线程'}</button><button data-action="widen">扩大到前后 60 秒</button>`;
+  $('#correlation').innerHTML=`候选关联：${escapeHTML(row.pod)} · ${escapeHTML(row.time)} 向前 ${windowSeconds + Math.max(0,row.duration||0)/1000} 秒、向后 ${windowSeconds} 秒（向前含 access 耗时）${sameThread?' · 同线程':''}。时间与线程可能被复用，请结合流水号确认。<button data-action="toggle-thread">${sameThread?'取消线程限制':'限定同线程'}</button><button data-action="widen">扩大到前后 60 秒</button>`;
 }
 async function correlate(row, seconds=5, sameThread=false) {
   setView('search'); $('#searchForm').reset();
   $('#node').value=row.node; updateFilters(); $('#pod').value=row.namespace+'/'+row.pod; updateFilters();
-  // Root first, run second, otherwise all types. User can adjust freely.
-  const kinds=state.files.filter(f => f.node===row.node && f.pod===row.pod && f.namespace===row.namespace).map(f => f.kind);
-  $('#kind').value=kinds.includes('root')?'root':kinds.includes('run')?'run':'';
-  $('#filterOffset').value='+0800'; $('#start').value=localInput(row.ts-seconds*1000); $('#end').value=localInput(row.ts+seconds*1000);
+  // Keep REST/WSF and asynchronous callbacks visible, even for HTTP 200.
+  $('#kind').value='';
+  $('#filterOffset').value='+0800'; $('#start').value=localInput(row.ts-seconds*1000-Math.max(0,row.duration||0)); $('#end').value=localInput(row.ts+seconds*1000);
   $('#thread').value=sameThread?row.thread:''; $('#advanced').open=true;
   state.correlation={row,seconds,sameThread}; correlationBanner(row,seconds,sameThread); updateFilters();
   await runSearch();
@@ -220,7 +230,7 @@ $('#aiForm').addEventListener('submit',async e=>{
 });
 $('#dataset').addEventListener('change',async()=>{state.dataset=$('#dataset').value;state.files=[];$('#searchForm').reset();try{await refreshDatasets(state.dataset);}catch(error){toast(error.message);}});
 $('#refresh').addEventListener('click',()=>refreshDatasets().catch(e=>toast(e.message)));
-for(const id of ['node','pod','kind'])$('#'+id).addEventListener('change',updateFilters);
+for(const id of ['node','pod','service','kind'])$('#'+id).addEventListener('change',updateFilters);
 $('#resetFilters').addEventListener('click',()=>{$('#searchForm').reset();state.correlation=null;$('#correlation').hidden=true;updateFilters();});
 $('#fileSearch').addEventListener('input',renderFiles);
 for(const id of ['sideUpload','topUpload'])$('#'+id).addEventListener('click',openUpload);
@@ -240,6 +250,7 @@ document.addEventListener('click',async e=>{
       $('#contextBody').innerHTML='<div class="notice">'+escapeHTML(result.available?(result.verified?'核验通过：原始文件对应行与索引原文一致。':'核验不一致：请检查原始包，以下展示回读原文。'):result.reason)+'</div>'+(result.available?'<pre class="log-content">'+escapeHTML(result.raw)+'</pre>':'');
     }
     if(action==='correlate')await correlate(row);
+    if(action==='request-key'){setView('search');$('#searchForm').reset();updateFilters();$('#requestKey').value=row.route_id||row.request_id;$('#advanced').open=true;state.correlation=null;$('#correlation').hidden=true;await runSearch();}
     if(action==='trace'){setView('trace');$('#traceId').value=row.trace;await runTrace();}
     if(action==='copy'){await navigator.clipboard.writeText(row.raw);toast('原文已复制');}
     if(action==='page'||action==='jump'){

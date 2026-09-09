@@ -40,7 +40,7 @@ def main(argv=None):
     sub.add_parser('files', help='列出所有 Node / Pod / 日志文件及来源')
     for name in ('search', 'export'):
         command = sub.add_parser(name, help='查询日志' if name == 'search' else '全量导出 NDJSON')
-        for key in ('q', 'node', 'namespace', 'pod', 'service', 'kind', 'filename', 'thread', 'level', 'start', 'end', 'status', 'min-duration', 'file-id'):
+        for key in ('q', 'node', 'namespace', 'pod', 'service', 'kind', 'filename', 'thread', 'level', 'start', 'end', 'status', 'min-duration', 'file-id', 'thread-id', 'route-id', 'request-id', 'request-key', 'endpoint'):
             command.add_argument('--' + key, default='')
         command.add_argument('--case', action='store_true', help='区分大小写')
         command.add_argument('--scan', action='store_true', help='跳过 FTS，加扫索引内全部原文；不是直接扫描压缩包')

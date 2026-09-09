@@ -75,7 +75,7 @@ python skills/logscope/scripts/logscope.py verify <日志ID>
 - `verify <id>`：回读保留的原始 ZIP，逐层找到文件/GZIP，对照行号读取原文，与索引内容比较。它验证文本一致性，不证明字段解析或根因推断正确。
 - `context`：看异常堆栈和附近日志。
 - `trace`：只匹配完整流水号。
-- `correlate`：同 Node/namespace/Pod 的时间窗口候选，可再加同线程；不是确定调用链。
+- `correlate`：同 Node/namespace/Pod 的所有日志类型时间窗口候选，向前包含 access 耗时，可再加同线程；不是确定调用链。返回 association_reasons，说明只是同线程、同时间窗口，还是有相同 traceId / 请求标识。
 
 v1.0 没保留原 ZIP，旧导入数据仍能搜，但 verify 会返回 `available=false`，需要重新上传。v1.1 开始成功导入时会保留外层 ZIP；新增占用等于原 ZIP 大小。
 
@@ -94,3 +94,11 @@ v1.0 没保留原 ZIP，旧导入数据仍能搜，但 verify 会返回 `availab
 | 服务重启后会话不存在 | 新建终端；旧报告仍在 data/terminal-sessions 下 |
 
 实现依据与接口参考：[Claude Skills](https://code.claude.com/docs/en/skills)、[Claude CLI](https://code.claude.com/docs/en/cli-reference)、[xterm.js](https://xtermjs.org/)、[pywinpty](https://github.com/andfoy/pywinpty)。公司魔改版以实际行为为准。
+
+## v1.2 格式与流程调整
+
+HTTP 200 不证明业务成功，Skill 会继续查看 root/rest 中的 WARN/ERROR，包括不同线程的异步回调。RouteID、出站 RequestId 和 traceId 分别保留，不把值不同的标识强行拼接。WSF 只根据实际存在的时间/线程关联，不伪造 traceId。第二个重复 traceId 不作为父子 Span。
+
+新增 CLI 条件：`--endpoint`（精确路径，忽略查询参数）、`--request-key`（完整值匹配 RouteID 或 RequestId）、`--route-id`、`--request-id`、`--thread-id`。页面同步提供对应字段与 Service 筛选。
+
+更新项目后，请重新上传旧索引的日志包并新建 Agent 终端，以使用新解析字段和新版 Skill。`datasets` 的 audit 会给出清单核对和物理行/记录覆盖统计；脱敏样例中不同 Pod 的相同文本保留各自来源，不能据此推断服务调用关系。
