@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="LogScope 本地多节点日志分析，嵌套压缩包搜索与请求追踪"><title>LogScope · 日志分析工作台</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<div class="app-shell">
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="LogScope 首页"><span class="brand-icon">L<span>▰</span></span><span>LogScope<small>日志分析工作台</small></span></a>
+  <div class="workspace-label">WORKSPACE <span>本地</span></div>
+  <nav aria-label="主导航">
+    <button class="nav active" data-view="search"><span>⌕</span>全局搜索<kbd>1</kbd></button>
+    <button class="nav" data-view="trace"><span>⑂</span>流水号追踪<kbd>2</kbd></button>
+    <button class="nav" data-view="files"><span>▤</span>日志文件<kbd>3</kbd></button>
+    <button class="nav" data-view="ai"><span>✧</span>AI 问诊<small>BETA</small></button>
+  </nav>
+  <div class="side-divider"></div>
+  <div class="side-heading">当前日志包<button id="refresh" class="icon-button" aria-label="刷新日志包">↻</button></div>
+  <select id="dataset" aria-label="选择日志包"><option value="">尚未导入日志包</option></select>
+  <div id="datasetInfo" class="dataset-info">上传外层 ZIP，自动检索所有节点。</div>
+  <button id="sideUpload" class="outline wide">＋ 导入日志包</button>
+  <div class="side-bottom"><div class="local-badge"><span></span> 本机存储 · 离线搜索</div><p>只有主动发起 AI 问诊时，才会向你配置的模型发送日志。</p><div class="version">LOGSCOPE <span>v1.0</span></div></div>
+</aside>
+<main>
+  <header class="topbar"><div><span class="breadcrumb">工作空间</span><span class="slash">/</span><span id="viewLabel">全局搜索</span></div><button id="settings" class="quiet">⚙ 模型配置</button></header>
+  <div class="main-content">
+    <div class="page-heading"><div><p class="eyebrow">INVESTIGATE YOUR LOGS</p><h1 id="viewTitle">每一条日志，都有迹可循。</h1><p id="viewDescription">跨节点搜索，从接口请求一路定位到异常现场。</p></div><button id="topUpload" class="primary">＋ 导入日志包</button></div>
+    <section id="importStatus" class="import-status" hidden aria-live="polite"></section>
+    <section id="searchView">
+      <form id="searchForm" class="search-panel">
+        <div class="search-tabs"><span class="selected">日志搜索</span><span class="subtle">支持关键词 / 接口路径 / 时间片段</span><span class="shortcut">Ctrl / ⌘ K</span></div>
+        <div class="search-main"><span class="search-symbol">⌕</span><input id="query" name="q" placeholder="输入关键词或接口，例如 /api/model/map" autocomplete="off" aria-label="日志搜索词"><button type="submit" class="primary">搜索日志 <span>↵</span></button></div>
+        <div class="filter-grid"><label>Node 节点<select id="node" name="node"><option value="">全部节点</option></select></label><label>Pod 实例<select id="pod" name="pod"><option value="">全部 Pod</option></select></label><label>日志类型<select id="kind" name="kind"><option value="">全部类型</option></select></label><label>文件名匹配<input name="filename" id="filename" placeholder="如 root*.log*"></label></div>
+        <details id="advanced"><summary>更多筛选<span>时间、线程、状态码、耗时</span></summary><div class="filter-grid advanced-grid"><label>开始时间（所选时区）<input type="datetime-local" step="0.001" name="start" id="start"></label><label>结束时间（所选时区）<input type="datetime-local" step="0.001" name="end" id="end"></label><label>筛选时区<select id="filterOffset"><option value="+0800">UTC+08:00</option><option value="+0000">UTC</option></select></label><label>线程 ID<input name="thread" id="thread" placeholder="http-nio-uds-exec-7"></label><label>级别<select id="level" name="level"><option value="">全部级别</option><option>ERROR</option><option>WARN</option><option>INFO</option><option>DEBUG</option><option>TRACE</option><option>FATAL</option></select></label><label>HTTP 状态<input name="status" id="status" placeholder="500 或 5xx"></label><label>最低耗时（ms）<input type="number" min="0" name="min_duration" placeholder="如 1000"></label><label class="checkbox"><input type="checkbox" name="case" value="1"> 区分大小写</label></div></details>
+        <div class="filter-footer"><span id="scopeText">当前范围：全部节点 · 全部日志</span><button type="button" class="text-button" id="resetFilters">重置筛选</button></div>
+      </form>
+      <div id="correlation" class="notice" hidden></div>
+      <div id="searchResults"></div>
+    </section>
+    <section id="traceView" hidden><form id="traceForm" class="search-panel"><div class="search-tabs"><span class="selected">请求时间线</span><span class="subtle">按完整流水号跨节点匹配</span></div><div class="search-main"><span class="search-symbol">⑂</span><input id="traceId" placeholder="输入流水号，例如 9124859898865451127" aria-label="流水号" required><button class="primary">追踪请求 →</button></div><p class="form-note">按日志时间排列所有命中记录；不含流水号的 access 日志，可通过时间与线程另行关联。</p></form><div id="traceResults"></div></section>
+    <section id="filesView" hidden><div class="file-toolbar"><h2>日志来源目录</h2><input id="fileSearch" placeholder="筛选 Pod、日志名或压缩包" aria-label="筛选日志文件"></div><div id="fileList"></div></section>
+    <section id="aiView" hidden><div class="ai-layout"><form id="aiForm" class="search-panel ai-form"><span class="pill blue">AI 问诊 · 可选</span><h2>让线索串起来</h2><p>先检索接口日志，提取状态与耗时，再关联同 Pod、相邻时间和线程下的业务日志。</p><label>接口路径<input id="aiEndpoint" placeholder="/api/model/map" required></label><label>你想排查的问题<textarea id="aiQuestion" rows="5" placeholder="这个接口为什么报错？帮我找出相关异常和可能原因。" required></textarea></label><label class="checkbox consent"><input type="checkbox" id="consent" required>本次允许将检索到的日志证据发送到配置的模型服务。</label><p class="form-note">仅做基础 Bearer 脱敏，请确认日志可发送。最多 60,000 字符证据，结果不代表全量日志。</p><button class="primary wide" id="analyzeButton">✧ 开始分析</button><button class="text-button" id="aiSettings" type="button">配置模型连接</button></form><div class="ai-output"><div class="ai-output-heading"><span>✧</span><h2>分析结果</h2></div><div id="aiAnswer" class="ai-answer">配置模型后，分析结果将在这里展示。<br><br>搜索与流水号追踪不依赖 AI，可以直接使用。</div></div></div></section>
+  </div>
+</main>
+</div>
+<dialog id="uploadDialog"><form id="uploadForm"><div class="dialog-heading"><div><p class="eyebrow">IMPORT ARCHIVE</p><h2>导入日志包</h2></div><button type="button" class="icon-button close" aria-label="关闭">×</button></div><label class="dropzone" id="dropzone"><span class="upload-glyph">↥</span><strong id="chosenName">点击选择，或将 ZIP 拖到这里</strong><span>直接上传外层压缩包，无需逐个解压</span><input id="uploadFile" type="file" accept=".zip" required></label><div class="archive-hint">外层 ZIP <span>›</span> Node ZIP <span>›</span> Pod / Service <span>›</span> log / *.log.gz</div><div class="filter-grid upload-options"><label>日志编码<select id="encoding"><option value="auto">自动（UTF-8 / GB18030）</option><option value="utf-8">UTF-8</option><option value="gb18030">GB18030 / GBK</option></select></label><label>无时区日志使用<input id="importOffset" value="+0800" pattern="[+-][0-9]{4}" required></label><label>access 最后一列单位<select id="durationUnit"><option value="ms">毫秒 ms（默认）</option><option value="s">秒 s</option><option value="us">微秒 μs</option></select></label></div><div id="uploadProgress" aria-live="polite"></div><div class="dialog-footer"><span>解析完成后自动打开搜索</span><button type="submit" class="primary" id="uploadSubmit">导入并建立索引 →</button></div></form></dialog>
+<dialog id="configDialog"><form id="configForm"><div class="dialog-heading"><div><p class="eyebrow">MODEL CONNECTION</p><h2>模型配置</h2></div><button type="button" class="icon-button close" aria-label="关闭">×</button></div><p class="form-note">兼容 /chat/completions 协议；地址填写到 /v1，后端自动追加接口路径。</p><label>Base URL<input id="baseUrl" type="url" placeholder="https://your-model-host/v1"></label><label>模型名称<input id="modelName" placeholder="填写服务提供的模型名称"></label><div class="notice">API Key 使用本机环境变量 <code>LOG_AI_API_KEY</code> 配置，设置后重启服务。<p id="keyState"></p></div><div class="dialog-footer"><span>搜索功能无需配置模型</span><button class="primary">保存配置</button></div></form></dialog>
+<dialog id="contextDialog" class="context-dialog"><div class="dialog-heading"><h2>原文件上下文</h2><button class="icon-button close" aria-label="关闭">×</button></div><p id="contextSource" class="source-path"></p><div id="contextBody"></div></dialog>
+<div id="toast" role="status" hidden></div>
+</body></html>
