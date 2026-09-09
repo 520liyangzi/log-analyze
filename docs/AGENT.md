@@ -1,8 +1,8 @@
-# 在网页终端里完成排查
+# AI 排查使用指南
 
-LogScope 提供三个互补入口：手动搜索、本地 Agent 终端、可选模型 API 问诊。终端直接运行你机器上的 Claude 或公司版本，Skill 定义检索与证据核验流程，脚本提供可重复执行的查询接口。AI 不会自动提升日志解析准确率；关键是让它保留检索范围、翻页核对、回读原文，并区分事实和猜测。
+推荐使用“页面提示词 + 稳定查询脚本 + 本机 AI”的方式。你维护排查经验，程序负责可重复的查询和来源追溯，本机 Claude 或公司 AI 负责多轮搜索与分析。Skill 只是可选入口，不需要安装才能使用页面。
 
-## 第一次使用
+## 第一次运行
 
 Windows 10 1809+ / Windows 11，Python 3.10+：
 
@@ -12,93 +12,110 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-如果是第一次克隆，先按 README 操作。`pywinpty` 是 Windows 真实交互终端的必要依赖；缺少它时搜索功能仍可使用，但页面会明确提示终端不可用，不会降级成假终端。Linux/macOS 使用系统 PTY，无额外 Python 依赖。前端 xterm.js 已随仓库附带，无需 npm，不需要 CDN。
+首次克隆见 README。打开 `http://127.0.0.1:8765`，上传日志包，进入左侧 **AI 排查**。
 
-终端内的程序继承启动 LogScope 时的 PATH。原先在 CMD 能输入 `claude` 启动，就在页面启动命令填 `claude`。例如公司命令叫 `codeagent`，改成 `codeagent`；如果它只在某个已设置环境的 CMD 里可运行，就从那个 CMD 启动 `python app.py`。这不会替你安装 Claude 或公司工具。
+1. 展开 **启动设置**。命令默认 `claude`；公司命令如果叫 `codeagent`，填写 `codeagent` 并保存。参数也可写在同一行。
+2. 保持默认“自动传入任务”。如果公司命令不接受启动问题，改为“兼容模式”。配置会保存在本机，以后无需重复填写。
+3. 填写问题，例如“检查 /api/model/map 为什么慢，看看不同 Pod 是否有异常”，点击 **开始排查**。
+4. 在下方终端完成登录、目录信任和工具权限确认。默认任务已经传入，不必再点击发送。兼容模式等待 AI 进入对话界面后，点击 **AI 就绪后发送任务**。
+5. 看 AI 查询并回复，直接继续输入追问。AI 写入 `report.md` 后页面会在约 5 秒内自动显示，也支持手动刷新和下载。
 
-操作顺序：上传日志包 → Agent 终端 → 填问题和启动命令 → 启动 → 在终端内完成 Agent 的首次提示 → 点击「发送排查任务」→ 阅读回复和继续追问。
+程序继承启动 LogScope 时的 PATH、环境变量及 AI 登录配置。如果公司工具只能在特定 CMD 环境使用，从那个 CMD 启动 `python app.py`。不会替你安装 Claude，也不会改变它使用哪个模型。网页终端不依赖页面的 API 模型配置。
 
-「只打开 CMD / Shell」保留普通命令行，可直接输入启动命令、切换配置或运行查询脚本。启动命令是你明确填写的本机 shell 命令，不是模型 Base URL。登录地址如果需要在浏览器打开，按 Agent 提示复制地址并完成登录；终端仍保留等待输入。
+Windows 终端需要 `pywinpty`；缺少时搜索仍能用，页面会给出安装提示。Linux/macOS 用系统 PTY。xterm.js 已随项目附带，无需 npm 或 CDN。
 
-## 任务怎么交给 Agent
+## 经常变化的规则怎么维护
 
-每次终端创建独立目录 `data/terminal-sessions/<随机ID>/`：
+点击 **编辑分析规则**：
 
-- `task.json`：当前日志包 ID、名称、本机服务地址、Python 路径、用户问题。
-- `task.md`：排查问题与完整 Skill 工作流，公司 Agent 不识别 Skill 目录也能读取。
-- `CLAUDE.md`：指向任务文件，不覆盖你全局或其他项目的说明。
-- `.claude/skills/logscope/`：本次使用的独立技能副本与查询脚本。
-- `report.md`：Agent 按任务要求生成后，页面可以查看和下载。
+| 区域 | 适合填写 |
+|---|---|
+| 分析流程 | 通用搜索方法、判断方式、报告格式 |
+| 公司业务规则 | 某接口慢请求阈值、错误码含义、已知异步链路、服务约定 |
+| 修改说明 | 这次更新的原因，便于以后找回 |
 
-「发送排查任务」只发送一条读取 `task.md` 的提示。等 Agent 已经进入聊天界面再点；在裸 CMD 提示符直接点会被 CMD 当作命令，而不会变成 AI 对话。之后像在原 CMD 一样打字、回车、用方向键、选择确认项或 Ctrl+C。工具权限确认由 Agent 原有机制处理，LogScope 不替你自动确认，也不增加绕过权限的参数。
+默认流程可直接使用，保留 HTTP 200 检查业务失败、全类型与异步线程关联、精确流水号、原包核验、分页覆盖和事实/推测区分等规则。公司业务规则默认为空，不把某次样例观察直接当作你们的业务事实。
 
-任务创建后固定绑定当时日志包和问题。改左侧日志包或输入框不会改变已经运行的任务；要分析另一个包，请新建终端，或在终端明确告诉 Agent 另一个数据集 ID。页面刷新会重连该标签页上次选中的会话，不会新开一个同名进程。重新启动 LogScope 后，旧进程已经结束，历史任务与报告文件仍在磁盘。
+保存后生成新版本。历史版本可载入编辑，保存时再生成一个新版本；恢复默认也需要保存才生效，不删除历史。多页面同时编辑时，旧页面不能覆盖新版本，会提示先刷新版本列表再合并。关掉编辑窗口保留本页未保存草稿；刷新页面会丢失未保存的规则草稿。问题草稿会在同一浏览器标签页暂存。
 
-终端是真实本机权限，不是沙箱；Skill 的只读要求是工作流程约束，不能限制一个任意 shell 程序。终端只监听本机 HTTP，通过 Host/Origin 校验拒绝跨站调用，不对外开放 WebSocket 或命令执行端口。输入不被单独记录；终端程序若自己回显内容，那会出现在终端画面中。当前屏幕输出在内存保留约 200 万字符，超出会提示缓存重置；完整业务日志可通过 CLI export 导出，Agent 自身对话记录由它自己的配置负责。
+规则保存在 `data/analysis-rules.json`，重启或更新代码不会覆盖自定义内容。“恢复默认”会使用当前代码携带的默认流程，并清空业务规则。备份数据目录即可同时保留规则历史。
 
-## 单独作为本地 Skill 使用
+每次任务保存创建时的规则版本。修改规则默认只影响新任务。已有任务需要更新时，先确认 AI 可以接收输入，再点 **发送最新规则到本次对话**。程序写入独立更新文件，并发送让 AI 读取的指令；是否采纳以它的回复和报告为准，页面不把“指令已发出”当作“模型已理解”。
 
-不从网页启动 Agent 也可以用。先运行 LogScope 并导入日志，再安装一次：
+格式变化造成字段未解析时，应修复解析器并重新导入，不能只修改分析提示词。独立 **API 问诊** 仍采用固定检索后的一次性模型请求，与这里的多轮终端和规则编辑分开。
+
+## 自动启动与兼容模式
+
+默认自动模式相当于在 CMD 中输入：
+
+```text
+claude "Read task.md in the current directory. Use its rules and query tools to investigate the question. Reply in Chinese and write report.md."
+```
+
+只有这条固定英文提示会追加为参数，问题和规则只写入文件。问题中的引号、换行、`&`、`$()` 等不会被拼成 shell 命令。参数模式依据 [Claude CLI 的交互式初始问题用法](https://code.claude.com/docs/en/cli-reference)，公司魔改版本若不兼容可手动发送；不会用固定延时猜测 AI 是否启动完成。
+
+命令以你填写的 shell 命令执行，路径有空格时按 CMD 习惯加双引号；不要把业务问题写进启动命令。默认不添加跳过权限确认的参数。若需要在外部浏览器登录，按 AI 给出的地址操作，回到页面终端继续。
+
+**只打开 CMD / Shell** 可直接输入命令，或用脚本手动查询。裸 CMD 中点击“发送任务”会被当成命令，所以先运行 AI、等它进入对话后再发送。
+
+## 任务文件与会话
+
+每个新任务独立存放在 `data/terminal-sessions/<ID>/`：
+
+- `task.json`：日志包、问题、本机服务地址、Python 路径、初始规则版本。
+- `task.md`：完整问题、规则和工具说明；公司 AI 即使不支持 Skill 也能读取。
+- `rules.json`：本次规则版本的原始快照。
+- `tools/logscope.py`：自包含的只读查询脚本。
+- `CLAUDE.md`：指向本次任务，不覆盖其他项目或全局说明。
+- `.claude/skills/logscope/`：可选的轻量发现入口及兼容脚本。
+- `rule-updates/` 与 `rule-updates.json`：显式准备的规则更新和版本记录，初始 task.md 不变。
+- `report.md`：AI 生成的报告。页面按纯文本显示，不执行其中的 HTML。
+
+**预览任务** 查看将用于新任务的内容，不启动 AI、不向模型发日志。**查看本次任务** 查看已创建的快照，避免把后来修改的问题或规则误认为正在使用的版本。
+
+切换左侧日志包不会改变正在运行的任务。分析新问题时创建新任务，或者在终端里明确追问。最多同时运行 3 个终端，用会话下拉菜单切换；刷新页面能重连原会话。停止 LogScope 会结束终端，重启后不能恢复原进程；历史报告仍在上述目录，页面不会自动恢复旧终端输出。
+
+终端具有本机当前用户的权限，提示词中的只读要求不是 OS 沙箱。HTTP 只监听 127.0.0.1，并检查 Host/Origin。输出在内存保留约 200 万字符，输入若被终端程序回显会出现在画面中，AI 自己的聊天存储遵循其配置。
+
+## 可选：在外部 AI 里使用 Skill
+
+先运行 LogScope 并导入日志，再按需要安装：
 
 ```powershell
-# 默认安装到当前用户 ~/.claude/skills/logscope
 python install_skill.py
-
-# 或仅安装到指定项目
 python install_skill.py --project D:\your-project
-
-# 或安装到公司 Agent 的自定义技能目录，参数是最终 logscope 目录
 python install_skill.py --target D:\company-agent\skills\logscope
 ```
 
-已有目标目录时会拒绝覆盖；升级前先备份/移走旧的 logscope 目录，再重新运行。不会修改其他技能或 Claude 全局权限设置。普通 Claude 可用 `/logscope` 调用，或让它按 Skill 分析本机日志。公司版本如果不支持自动技能发现，让它读取安装目录内的 `SKILL.md`，按里面的脚本说明操作即可。
+上面是三个可选位置，不必全部执行。目标目录存在会拒绝覆盖，升级前先备份/移走旧目录。默认安装到当前用户 `~/.claude/skills/logscope`。普通 Claude 可用 `/logscope`；公司工具是否发现 Skill 以实际版本为准。
 
-手动调用脚本：
+外部 Skill 通过 CLI 的 `rules` 命令读取页面保存的分析流程和公司业务规则，因此不再需要修改 SKILL.md 来更新排查经验。已有页面任务仍使用自己的版本快照，不自动拉取最新规则。
 
 ```powershell
+python skills/logscope/scripts/logscope.py rules
 python skills/logscope/scripts/logscope.py datasets
-python skills/logscope/scripts/logscope.py --dataset <日志包ID> files
-python skills/logscope/scripts/logscope.py --dataset <日志包ID> search --q /api/model/map --access-only --status 5xx
-python skills/logscope/scripts/logscope.py correlate <日志ID> --seconds 5 --kind root
-python skills/logscope/scripts/logscope.py --dataset <日志包ID> trace 9124859898865451127
-python skills/logscope/scripts/logscope.py verify <日志ID>
+python skills/logscope/scripts/logscope.py --dataset YOUR_DATASET_ID search --endpoint /api/model/map --access-only
+python skills/logscope/scripts/logscope.py correlate 123 --seconds 30
+python skills/logscope/scripts/logscope.py --dataset YOUR_DATASET_ID trace 9124859898865451127
+python skills/logscope/scripts/logscope.py verify 123
 ```
 
-`<日志包ID>` 等是要替换的占位内容。命令也可在网页 CMD 中执行；用任务给出的 Python 路径和 `.claude/skills/logscope/scripts/logscope.py`。网页终端已设置 `LOGSCOPE_URL` / `LOGSCOPE_DATASET_ID`，一般无需手填这两个全局参数。
+替换示例数据集 ID、日志 ID、接口和流水号；在页面创建的任务目录使用 `tools/logscope.py`。`--url` 和 `--dataset` 放在子命令前，其他参数放在子命令后。查询 JSON 明确给出命中总数、has_more、下一页以及完整来源。
 
-改了服务端口时用 `--url http://127.0.0.1:8877`，放在子命令前。`--dataset` 也放在子命令前，查询条件放在子命令后。结果是 JSON，返回总数、当前页、下一页和完整来源，便于 Agent 自主缩小范围或翻页。
-
-## 如何核对「搜得准不准」
-
-- `search`：默认使用现有索引与原文连续子串检查。
-- `search --scan`：跳过 FTS，在已导入原文上扫描；不能发现未被导入的文件。
-- `verify <id>`：回读保留的原始 ZIP，逐层找到文件/GZIP，对照行号读取原文，与索引内容比较。它验证文本一致性，不证明字段解析或根因推断正确。
-- `context`：看异常堆栈和附近日志。
-- `trace`：只匹配完整流水号。
-- `correlate`：同 Node/namespace/Pod 的所有日志类型时间窗口候选，向前包含 access 耗时，可再加同线程；不是确定调用链。返回 association_reasons，说明只是同线程、同时间窗口，还是有相同 traceId / 请求标识。
-
-v1.0 没保留原 ZIP，旧导入数据仍能搜，但 verify 会返回 `available=false`，需要重新上传。v1.1 开始成功导入时会保留外层 ZIP；新增占用等于原 ZIP 大小。
+`verify` 核对原包解码文本与索引一致，不证明解析语义或根因。`--scan` 只扫描已导入文本，不能找出未导入的文件。`correlate` 返回时间/线程等候选，不保证同一请求。大量匹配可以翻页或 `export`，报告需明确实际审阅范围。
 
 ## 常见情况
 
 | 现象 | 处理 |
 |---|---|
-| 提示缺少 pywinpty | 使用启动服务的同一 Python 执行 `python -m pip install -r requirements.txt`，然后重启 |
-| 提示 claude 不是命令 | 检查安装与 PATH，或填写可执行文件完整路径（空格路径在 CMD 中加双引号） |
-| 公司 CLI 不认 Skill | 直接让它读取任务目录中的 task.md，内含完整流程 |
-| Agent 等待授权或登录 | 在网页终端里完成；LogScope 不绕过这些提示 |
-| 终端显示很窄或布局错位 | 点全屏；页面会把尺寸同步给真实终端 |
-| 输入要粘贴多行 | 用「粘贴」按钮，或 Ctrl+Shift+V；行为遵循程序的 bracketed paste 支持 |
-| 点击发送任务后提示不是命令 | 当前还在 CMD，先输入启动命令，等 Agent 进入对话界面再发送 |
-| 没有 report.md | 让 Agent 将完整分析写入当前目录 report.md，再点刷新报告 |
-| 服务重启后会话不存在 | 新建终端；旧报告仍在 data/terminal-sessions 下 |
+| claude 或公司命令不存在 | 检查本机安装与 PATH；从可运行该命令的 CMD 启动 LogScope |
+| 公司命令不接受启动参数 | 结束终端，改为兼容模式后重新开始 |
+| AI 只启动，没有开始查 | 完成登录/确认；进入对话后点击发送任务，查看它是否读取 task.md |
+| AI 不识别 Skill | 不影响页面任务；让它读取 task.md，按工具说明运行脚本 |
+| 改规则后旧对话没变化 | 保存规则后，显式发送最新规则，并从 AI 回复确认 |
+| 规则保存提示版本冲突 | 刷新版本列表，保留你的草稿，载入最新版本再合并 |
+| 报告没有出现 | 让 AI 保存当前目录 report.md；写完后页面自动更新 |
+| 终端太小 | 点全屏，尺寸会同步给真实终端 |
+| 服务重启后会话消失 | 新建任务；历史文件仍在 data/terminal-sessions |
 
-实现依据与接口参考：[Claude Skills](https://code.claude.com/docs/en/skills)、[Claude CLI](https://code.claude.com/docs/en/cli-reference)、[xterm.js](https://xtermjs.org/)、[pywinpty](https://github.com/andfoy/pywinpty)。公司魔改版以实际行为为准。
-
-## v1.2 格式与流程调整
-
-HTTP 200 不证明业务成功，Skill 会继续查看 root/rest 中的 WARN/ERROR，包括不同线程的异步回调。RouteID、出站 RequestId 和 traceId 分别保留，不把值不同的标识强行拼接。WSF 只根据实际存在的时间/线程关联，不伪造 traceId。第二个重复 traceId 不作为父子 Span。
-
-新增 CLI 条件：`--endpoint`（精确路径，忽略查询参数）、`--request-key`（完整值匹配 RouteID 或 RequestId）、`--route-id`、`--request-id`、`--thread-id`。页面同步提供对应字段与 Service 筛选。
-
-更新项目后，请重新上传旧索引的日志包并新建 Agent 终端，以使用新解析字段和新版 Skill。`datasets` 的 audit 会给出清单核对和物理行/记录覆盖统计；脱敏样例中不同 Pod 的相同文本保留各自来源，不能据此推断服务调用关系。
+从 v1.2 升级到 v1.3 不需重传日志。v1.1 或更早的数据若显示解析器升级提示，需要重新上传以补齐字段；v1.0 未保留原 ZIP 的数据也需要重新上传才能原包核验。

@@ -594,7 +594,7 @@ def ai_analyze(store, payload):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.2'
+    server_version = 'LogScope/1.3'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -644,6 +644,10 @@ class Handler(BaseHTTPRequestHandler):
                                                params.get('page', 1), params.get('kind', ''), params.get('size', 50)))
             elif parsed.path == '/api/terminal/config':
                 self.json(self.server.terminals.config())
+            elif parsed.path == '/api/analysis/rules':
+                self.json(self.server.terminals.rules.get(params.get('version')))
+            elif parsed.path == '/api/terminal/task':
+                self.json(self.server.terminals.task_details(params['id']))
             elif parsed.path == '/api/terminal/sessions':
                 self.json(self.server.terminals.list())
             elif parsed.path == '/api/terminal/output':
@@ -725,6 +729,12 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(size) or b'{}')
                 if parsed.path == '/api/terminal/config':
                     self.json(self.server.terminals.save_config(body))
+                elif parsed.path == '/api/analysis/rules':
+                    self.json(self.server.terminals.rules.save(body))
+                elif parsed.path == '/api/terminal/preview':
+                    self.json(self.server.terminals.preview(body))
+                elif parsed.path == '/api/terminal/rules':
+                    self.json(self.server.terminals.update_rules(body))
                 elif parsed.path == '/api/terminal/start':
                     self.json(self.server.terminals.start(body), 201)
                 elif parsed.path == '/api/terminal/input':

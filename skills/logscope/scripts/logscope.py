@@ -37,6 +37,7 @@ def main(argv=None):
     parser.add_argument('--dataset', default=dataset, help='数据集 ID，也可设置 LOGSCOPE_DATASET_ID')
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('datasets', help='列出导入的日志包及状态')
+    sub.add_parser('rules', help='读取页面保存的最新分析规则；已有任务使用其版本快照')
     sub.add_parser('files', help='列出所有 Node / Pod / 日志文件及来源')
     for name in ('search', 'export'):
         command = sub.add_parser(name, help='查询日志' if name == 'search' else '全量导出 NDJSON')
@@ -78,6 +79,8 @@ def main(argv=None):
     if name == 'trace':
         args['trace'] = args.pop('trace_id')
     route = '/api/search' if name == 'trace' else '/api/' + name
+    if name == 'rules':
+        route = '/api/analysis/rules'
     if name == 'export':
         output.parent.mkdir(parents=True, exist_ok=True)
         # Avoid replacing an earlier evidence export accidentally.
