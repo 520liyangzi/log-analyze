@@ -30,6 +30,7 @@ const viewMeta = {
   search:['全局搜索','每一条日志，都有迹可循。','跨节点搜索，从接口请求一路定位到异常现场。'],
   trace:['流水号追踪','把一次请求，完整串起来。','跨 Pod 汇集同一流水号，按时间还原请求过程。'],
   files:['日志文件','每个节点，每份日志。','查看解析到的原始文件及其完整压缩包来源。'],
+  terminal:['Agent 终端','在这里，完成整次排查。','运行本地 Claude 或公司 Agent，按 Skill 检索、核验原文并继续追问。'],
   ai:['AI 问诊','从日志线索，到问题原因。','基于实际检索证据分析；由你决定何时连接模型。']
 };
 function setView(view) {
@@ -39,6 +40,7 @@ function setView(view) {
   const [label,title,description] = viewMeta[view];
   $('#viewLabel').textContent=label; $('#viewTitle').textContent=title; $('#viewDescription').textContent=description;
   if (view === 'files') renderFiles();
+  document.dispatchEvent(new CustomEvent('logscope:view', {detail: view}));
 }
 function empty(container, title, message, importButton=false) {
   container.innerHTML = `<div class="empty"><span class="empty-icon">⌕</span><h2>${escapeHTML(title)}</h2><p>${escapeHTML(message)}</p>${importButton ? '<button class="primary" data-action="upload">＋ 导入第一个日志包</button>' : ''}</div>`;
@@ -102,7 +104,7 @@ function searchParams() {
 function rowHTML(row, keyword, timeline=false) {
   state.rows.set(row.id,row);
   const error = row.status >= 400 || ['ERROR','FATAL'].includes(row.level);
-  return `<article class="log-row"><div class="log-meta"><span class="log-time">${escapeHTML(row.time || '未识别时间')}</span><span class="badge ${error ? 'error' : row.level === 'WARN' ? 'warn' : ''}">${escapeHTML(row.level || 'RAW')}</span>${row.status ? `<span class="badge ${row.status>=400?'error':'success'}">${row.status}</span>`:''}<span class="log-pod">${escapeHTML(row.pod)}</span><span class="log-kind">${escapeHTML(row.filename)}</span>${row.duration!=null?`<span>${number(row.duration)} ms</span>`:''}<span class="log-number">L${row.line}${row.end_line>row.line?'–'+row.end_line:''}</span></div><pre class="log-content ${error?'is-error':''}">${highlight(row.raw,keyword)}</pre><p class="source-path"><span>来源</span>${escapeHTML(row.source)}</p><div class="log-actions"><button data-action="context" data-id="${row.id}">查看上下文</button>${row.ts!=null?`<button data-action="correlate" data-id="${row.id}">同 Pod 相邻日志 →</button>`:''}${row.trace && !timeline?`<button data-action="trace" data-id="${row.id}">追踪流水号</button>`:''}<button data-action="copy" data-id="${row.id}">复制原文</button><span class="thread-label">${escapeHTML(row.node)}${row.thread?' · '+escapeHTML(row.thread):''}</span></div></article>`;
+  return `<article class="log-row"><div class="log-meta"><span class="log-time">${escapeHTML(row.time || '未识别时间')}</span><span class="badge ${error ? 'error' : row.level === 'WARN' ? 'warn' : ''}">${escapeHTML(row.level || 'RAW')}</span>${row.status ? `<span class="badge ${row.status>=400?'error':'success'}">${row.status}</span>`:''}<span class="log-pod">${escapeHTML(row.pod)}</span><span class="log-kind">${escapeHTML(row.filename)}</span>${row.duration!=null?`<span>${number(row.duration)} ms</span>`:''}<span class="log-number">L${row.line}${row.end_line>row.line?'–'+row.end_line:''}</span></div><pre class="log-content ${error?'is-error':''}">${highlight(row.raw,keyword)}</pre><p class="source-path"><span>来源</span>${escapeHTML(row.source)}</p><div class="log-actions"><button data-action="context" data-id="${row.id}">查看上下文</button><button data-action="verify" data-id="${row.id}">核验原始压缩包</button>${row.ts!=null?`<button data-action="correlate" data-id="${row.id}">同 Pod 相邻日志 →</button>`:''}${row.trace && !timeline?`<button data-action="trace" data-id="${row.id}">追踪流水号</button>`:''}<button data-action="copy" data-id="${row.id}">复制原文</button><span class="thread-label">${escapeHTML(row.node)}${row.thread?' · '+escapeHTML(row.thread):''}</span></div></article>`;
 }
 function metrics(summary, trace=false) {
   return `<div class="metric-grid"><div class="metric"><span class="metric-label">${trace?'流程记录':'匹配日志'} <span>≡</span></span><span class="metric-value">${number(summary.total)}<small>条</small></span></div><div class="metric"><span class="metric-label">命中节点 <span>▦</span></span><span class="metric-value">${number(summary.nodes)}<small>Node / ${number(summary.pods)} Pod</small></span></div><div class="metric"><span class="metric-label">来源文件 <span>▤</span></span><span class="metric-value">${number(summary.files)}<small>份</small></span></div><div class="metric error"><span class="metric-label">异常记录 <span>!</span></span><span class="metric-value">${number(summary.errors)}<small>ERROR / HTTP ≥400</small></span></div></div>`;
@@ -232,6 +234,11 @@ document.addEventListener('click',async e=>{
   try {
     if(action==='upload')openUpload();
     if(action==='context')await openContext(row);
+    if(action==='verify'){
+      $('#contextSource').textContent=row.source;$('#contextBody').textContent='正在回读原始压缩包，请稍候…';$('#contextDialog').showModal();
+      const result=await api('/api/verify?id='+row.id);
+      $('#contextBody').innerHTML='<div class="notice">'+escapeHTML(result.available?(result.verified?'核验通过：原始文件对应行与索引原文一致。':'核验不一致：请检查原始包，以下展示回读原文。'):result.reason)+'</div>'+(result.available?'<pre class="log-content">'+escapeHTML(result.raw)+'</pre>':'');
+    }
     if(action==='correlate')await correlate(row);
     if(action==='trace'){setView('trace');$('#traceId').value=row.trace;await runTrace();}
     if(action==='copy'){await navigator.clipboard.writeText(row.raw);toast('原文已复制');}

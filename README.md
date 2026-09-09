@@ -2,7 +2,7 @@
 
 上传一个外层 ZIP，搜索全部节点的 `.log` / `.log.gz`，通过接口、Pod、时间、线程和流水号定位请求。中文界面，日志与索引保存在本机。
 
-**第一版优先把搜索做完整。Python 3.10+ 即可启动，无需 pip、Node.js、Java、Docker 或外部数据库。** 前端为原生 HTML/CSS/JavaScript，后端为 Python 标准库 + SQLite；可断网运行（可选 AI 需要访问模型服务）。
+**Python 3.10+ 即可运行搜索；Windows 网页交互终端需要安装 requirements.txt 中的 pywinpty。无需 Node.js、Java、Docker 或外部数据库。** 前端为原生 HTML/CSS/JavaScript，后端为 Python 标准库 + SQLite；可断网运行（可选 AI 需要访问模型服务）。
 
 ## 1. Windows 启动
 
@@ -11,6 +11,7 @@
 ```powershell
 git clone https://github.com/520liyangzi/log-analyze.git
 cd log-analyze
+python -m pip install -r requirements.txt
 python app.py
 ```
 
@@ -25,6 +26,24 @@ python3 app.py
 ```
 
 端口占用时：`python app.py --port 8877`，浏览器也改为 `http://127.0.0.1:8877`。
+
+## 网页内运行 Claude / 公司 Agent（v1.1）
+
+页面现在内置真实交互终端：**Windows 使用 CMD + ConPTY，Linux/macOS 使用 PTY Shell**，支持完整输入、方向键、确认、追问、Ctrl+C 和屏幕重绘。不是 stdout 展示框，也不弹出外部 CMD。
+
+1. 拉取更新后，Windows 运行 `python -m pip install -r requirements.txt`，再启动 `python app.py`。
+2. 上传并选择日志包，点击左侧 **Agent 终端**。
+3. 启动命令默认 `claude`，直接替换为公司命令；如需启动参数，也在同一行填写。命令会像手动输入 CMD 一样执行。
+4. 填写本次问题，点击 **启动终端并运行**。也可点击 **只打开 CMD / Shell**，自己输入命令。
+5. 在网页终端内完成登录、工作目录信任和工具权限确认。等 Agent 进入对话界面，点击 **发送排查任务**。
+6. Agent 会读取已经准备的任务、Skill 和脚本，查询日志、关联请求、核验原文，再回复分析。你可以在同一个终端继续追问。
+7. 展开 **查看本次分析报告**、点击刷新可读取 Agent 写入的 `report.md`，也可以下载。若 Agent 没写文件，终端回复仍然保留，可要求它保存报告。
+
+**这个入口不使用页面的模型 API 配置，也不自动更换 Agent 的模型。** 它继承启动 LogScope 时的环境、PATH 和你的 Agent 登录配置。公司版若只改了命令，通常只需换启动命令；若技能目录机制不同，`task.md` 已内嵌完整流程，不依赖它自动识别 Skill。实际兼容性需用你的公司版本验证。
+
+终端按本机当前用户权限运行；不会添加跳过权限确认的参数。刷新网页可重连当前会话，切换搜索页不会杀掉终端；**停止 LogScope 服务会结束终端，重启服务不能恢复旧进程**。每次终端固定绑定创建时的日志包，后来切换左侧日志包不会改变该终端的任务。最多同时运行 3 个终端；切换会话时可用上方下拉菜单。
+
+完整说明见 [网页终端与 Skill 使用指南](docs/AGENT.md)。
 
 ## 2. 先跑一次演示
 
@@ -64,7 +83,7 @@ python demo.py
     └── ...
 ```
 
-`fileList.txt` 不是日志，不参与检索；程序实际遍历 ZIP 内容，不依赖清单准确性。只处理固定 `log/` 层下文件名含 `.log` 的文件；Node、namespace、Pod、service、日志类型均动态识别。内层 ZIP 文件名作为 Node 标识，原始名称始终保留在来源中。GZIP 不会展开到用户指定目录，内层 ZIP 使用临时文件，日志流式读取。
+`fileList.txt` 不是日志，不参与检索；程序实际遍历 ZIP 内容，不依赖清单准确性。只处理固定 `log/` 层下文件名含 `.log` 的文件；Node、namespace、Pod、service、日志类型均动态识别。内层 ZIP 文件名作为 Node 标识，原始名称始终保留在来源中。GZIP 不会展开到用户指定目录，内层 ZIP 使用临时文件，日志流式读取。v1.1 起会额外保留外层 ZIP，供「核验原始压缩包」回读；旧版已导入日志仍可检索，但需重新上传才可核验。
 
 导入选项：
 
@@ -87,6 +106,7 @@ python demo.py
 | 根据 access 查正式日志 | 点击「同 Pod 相邻日志」，自动清空接口搜索词，选 root/run 和时间范围 |
 | 查一个请求 | 进入流水号追踪，完整 ID 精确匹配；64 位以上数字也按字符串处理 |
 | 看异常堆栈 | 每条记录保留后续多行；搜索到堆栈内容时展示整条记录 |
+| 原文核验 | 点击「核验原始压缩包」，回读原 ZIP 中对应文件/行并与索引原文比较 |
 | 回到原文件查看前后内容 | 点击「查看上下文」，展示原文件相邻记录和原始行号 |
 | 保存全部结果 | 点击「导出全部」，下载 NDJSON，每行 JSON 包含原文、行号和完整来源 |
 
@@ -133,13 +153,14 @@ python3 app.py
 
 第一版采用**确定性检索 + 模型分析**：在 access 记录中查接口关键词，优先选择错误和慢请求；取最多 5 个请求关联同 Node/Pod、时间、线程的日志；遇到流水号继续检索链路，再将证据交给模型。为防止上下文过大：接口候选最多 100 条，每次关联或流水号检索最多 100 条，单条原文最多 4000 字符，总证据最多 60000 字符。界面明确显示证据数，AI 证据上限不影响普通搜索、分页和全量导出。
 
-目前不做自由工具调用式智能体，也不声称自动找出的原因必然正确。只对 Bearer 凭证做基础脱敏，**不是完整敏感信息识别器**，请确认日志可发送给你的模型服务。API Key 不写入浏览器、仓库和配置文件；模型地址/名称保存在本机 `data/ai-config.json`。未配置模型或未主动分析，不会发起模型网络请求。
+目前不做自由工具调用式智能体，也不声称自动找出的原因必然正确。只对 Bearer 凭证做基础脱敏，**不是完整敏感信息识别器**，请确认日志可发送给你的模型服务。API Key 不写入浏览器、仓库和配置文件；模型地址/名称保存在本机 `data/ai-config.json`。未主动发起 API 问诊，不会通过此适配器请求模型。另一个「Agent 终端」入口由你启动的 Claude/公司 Agent 自行使用其模型配置。
 
 ## 7. 数据、限制与维护
 
 默认只监听 `127.0.0.1`，供本机单人使用，不是公网多人服务。Host / Origin 校验限制第三方网页读取本地 API。无第三方 CDN 或前端遥测。
 
-- 数据位置：`data/logs.sqlite3` 及 SQLite 伴随文件；重启保留导入记录。
+- 数据位置：`data/logs.sqlite3` 及 SQLite 伴随文件；重启保留导入记录。原 ZIP 位于 `data/archives/`，因此会额外占用压缩包大小的磁盘空间。
+- 终端任务：`data/terminal-sessions/<id>/` 存放任务、Skill 和 Agent 报告。终端输出只在内存保留最近约 200 万字符；这不是持久化终端录像。Agent 自己的会话记录由其配置决定。
 - 更换目录：`python app.py --data D:\logscope-data`。
 - 清空数据：先停止服务，再删除自己的 `data` 目录（也会删除模型地址配置）。
 - ZIP 导入失败时整体回滚，显示明确错误，不把不完整结果冒充成功。
@@ -160,8 +181,9 @@ python3 app.py
 ## 8. 开发与验证
 
 ```powershell
+python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
-python -m py_compile app.py demo.py
+python -m py_compile app.py demo.py terminal_bridge.py
 ```
 
 可选安装 Node.js 后执行 `node --check dist/app.js` 检查前端语法；**运行项目不需要 Node.js**。
@@ -174,7 +196,11 @@ app.py              HTTP API、ZIP/GZIP 导入、SQLite 搜索、解析和 AI �
  dist/style.css     响应式样式
  dist/app.js        上传、筛选、分页、时间线、关联、配置
  demo.py            生成可复现的模拟日志包
- tests/test_app.py  解析、搜索、分页、导出、HTTP、回滚等测试
+ tests/             搜索、核验、CLI、真实 PTY 输入输出与中断等测试
+ terminal_bridge.py 本机真实终端后端
+ dist/terminal.js   xterm.js 交互终端
+ skills/logscope/   可独立安装的 Skill 和只读日志 CLI
+ install_skill.py   安装 Skill 到 Claude 或指定目录
  docs/              原始目录约定和验证说明
  start.bat          Windows 启动
 ```

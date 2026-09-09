@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -16,6 +17,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
+from terminal_bridge import TerminalManager, dimensions
 
 BASE = Path(__file__).resolve().parent
 STAMP = re.compile(r'^\[?(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:[.,]\d{1,6})?)(?:\s*([+-]\d{4}))?')
@@ -90,6 +92,7 @@ class Store:
     def __init__(self, directory):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
+        (self.directory / 'archives').mkdir(exist_ok=True)
         self.database = self.directory / 'logs.sqlite3'
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.progress = {}
@@ -110,6 +113,8 @@ class Store:
               CREATE INDEX IF NOT EXISTS logs_file_line ON logs(file_id,line);
               CREATE INDEX IF NOT EXISTS files_scope ON files(dataset,node,pod,kind);
             ''')
+            if 'archive_chain' not in {r['name'] for r in db.execute('PRAGMA table_info(files)')}:
+                db.execute("ALTER TABLE files ADD COLUMN archive_chain TEXT")
             db.execute("UPDATE datasets SET state='failed', error='上次导入被中断，请重新上传' WHERE state='importing'")
         self.fts = False
         with self.connect() as db:
@@ -160,10 +165,11 @@ class Store:
                         db.execute('INSERT INTO log_fts(rowid,raw) VALUES(?,?)', (cursor.lastrowid, raw))
                     stats['records'] += 1
 
-                def read_log(stream, meta):
+                def read_log(stream, meta, chain):
                     cursor = db.execute('INSERT INTO files(dataset,node,namespace,pod,service,kind,filename,archive,path,source,encoding) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                                         (identifier, *meta.values(), encoding))
                     fid = cursor.lastrowid
+                    db.execute('UPDATE files SET archive_chain=? WHERE id=?', (json.dumps(chain), fid))
                     before = stats['records']
                     pending, parsed, start, end, size = [], None, 0, 0, 0
                     selected = encoding
@@ -236,16 +242,19 @@ class Store:
                                 with archive.open(item) as source:
                                     if lower.endswith('.gz'):
                                         with gzip.GzipFile(fileobj=source) as uncompressed:
-                                            read_log(uncompressed, meta)
+                                            read_log(uncompressed, meta, chain)
                                     else:
-                                        read_log(source, meta)
+                                        read_log(source, meta, chain)
                 with zipfile.ZipFile(path) as archive:
                     walk(archive, [name])
                 if not stats['files']:
                     raise ValueError('未找到符合 namespace_pod/service/pod-service/log/ 结构的日志')
+                # Publish the original archive before committing the searchable dataset.
+                shutil.move(str(path), str(self.directory / 'archives' / (identifier + '.zip')))
                 db.execute("UPDATE datasets SET state='ready',files=?,records=?,warnings=? WHERE id=?",
                            (stats['files'], stats['records'], json.dumps(warnings, ensure_ascii=False), identifier))
         except Exception as exc:
+            (self.directory / 'archives' / (identifier + '.zip')).unlink(missing_ok=True)
             with self.connect() as db:
                 db.execute("UPDATE datasets SET state='failed',error=? WHERE id=?", (str(exc), identifier))
         finally:
@@ -310,7 +319,7 @@ class Store:
         if len(keyword) > 2000:
             raise ValueError('搜索词最多 2000 个字符')
         if keyword:
-            if self.fts and len(keyword) >= 3 and '\n' not in keyword:
+            if self.fts and params.get('scan') != '1' and len(keyword) >= 3 and '\n' not in keyword:
                 clauses.append('l.id IN (SELECT rowid FROM log_fts WHERE log_fts MATCH ?)')
                 args.append('"' + keyword.replace('"', '""') + '"')
             clauses.append('instr(l.raw,?)>0' if params.get('case') == '1' else 'instr(lower(l.raw),lower(?))>0')
@@ -343,6 +352,85 @@ class Store:
             self.require_ready(db, row['dataset'])
             return [dict(r) for r in db.execute('SELECT * FROM logs WHERE file_id=? AND line BETWEEN ? AND ? ORDER BY line',
                                                (row['file_id'], max(1, row['line'] - radius), row['end_line'] + radius))]
+
+    def record(self, identifier):
+        with self.connect() as db:
+            row = db.execute('SELECT l.*,f.node,f.namespace,f.pod,f.service,f.kind,f.filename,f.source,f.path,f.archive_chain,f.encoding '
+                             'FROM logs l JOIN files f ON f.id=l.file_id WHERE l.id=?', (identifier,)).fetchone()
+            if not row:
+                raise ValueError('日志不存在')
+            self.require_ready(db, row['dataset'])
+            return dict(row)
+
+    def correlate(self, identifier, seconds=5, same_thread=False, page=1, kind='', size=50):
+        row = self.record(identifier)
+        if row['ts'] is None:
+            raise ValueError('该日志没有可识别的时间')
+        if same_thread and not row['thread']:
+            raise ValueError('该日志没有线程字段，请取消同线程限制')
+        seconds = min(3600, max(1, float(seconds)))
+        def at(ms):
+            return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f +0000')
+        params = dict(dataset=row['dataset'], node=row['node'], namespace=row['namespace'], pod=row['pod'],
+                      start=at(row['ts'] - seconds * 1000), end=at(row['ts'] + seconds * 1000),
+                      thread=row['thread'] if same_thread else '', kind=kind, page=page, size=size)
+        result = self.search(params)
+        result.update(association='candidate', anchor_id=identifier, filters=params,
+                      caveat='时间/线程关联只是候选；线程复用、异步切换、节点时钟偏差都可能影响判断。')
+        return result
+
+    def verify(self, identifier):
+        row = self.record(identifier)
+        path = self.directory / 'archives' / (row['dataset'] + '.zip')
+        if not path.exists() or not row['archive_chain']:
+            return dict(available=False, verified=False, id=identifier, source=row['source'],
+                        reason='旧版导入未保留原始 ZIP，请重新上传后核验。')
+        chain = json.loads(row['archive_chain'])
+        max_bytes = int(os.getenv('LOG_MAX_EXPANDED_GB', '20')) * 1024 ** 3
+        max_line = int(os.getenv('LOG_MAX_RECORD_MB', '8')) * 1024 ** 2
+        copied, lines = 0, []
+        with contextlib.ExitStack() as stack:
+            archive = stack.enter_context(zipfile.ZipFile(path))
+            for member in chain[1:]:
+                matches = [entry for entry in archive.infolist() if entry.filename == member]
+                if len(matches) != 1:
+                    raise ValueError('压缩包包含重名成员，无法唯一核验来源')
+                source = stack.enter_context(archive.open(matches[0]))
+                temp = stack.enter_context(tempfile.TemporaryFile())
+                while chunk := source.read(1024 * 1024):
+                    copied += len(chunk)
+                    if copied > max_bytes:
+                        raise ValueError('原文核验超过读取限制')
+                    temp.write(chunk)
+                temp.seek(0)
+                archive = stack.enter_context(zipfile.ZipFile(temp))
+            matches = [entry for entry in archive.infolist() if entry.filename == row['path']]
+            if len(matches) != 1:
+                raise ValueError('日志包含重名成员，无法唯一核验来源')
+            source = stack.enter_context(archive.open(matches[0]))
+            if row['filename'].lower().endswith('.gz'):
+                source = stack.enter_context(gzip.GzipFile(fileobj=source))
+            for number in range(1, row['end_line'] + 1):
+                raw = source.readline(max_line + 1)
+                copied += len(raw)
+                if len(raw) > max_line or copied > max_bytes:
+                    raise ValueError('原文核验超过读取限制')
+                if not raw:
+                    break
+                if number < row['line']:
+                    continue
+                if row['encoding'] == 'auto':
+                    try:
+                        text = raw.decode('utf-8-sig')
+                    except UnicodeDecodeError:
+                        text = raw.decode('gb18030', errors='replace')
+                else:
+                    text = raw.decode(row['encoding'], errors='replace')
+                lines.append(text.rstrip('\r\n'))
+        original = '\n'.join(lines)
+        return dict(available=True, verified=original == row['raw'], id=identifier, source=row['source'],
+                    line=row['line'], end_line=row['end_line'], raw=original,
+                    comparison='按导入编码解码并去除行尾换行符后，与索引原文比较；不是日志语义准确性的证明。')
 
     def export(self, params):
         where, args = self.query_parts(params)
@@ -455,6 +543,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(self.store.search(params))
             elif parsed.path == '/api/context':
                 self.json(self.store.context(int(params['id']), min(200, max(1, int(params.get('radius', 15))))))
+            elif parsed.path == '/api/record':
+                self.json(self.store.record(int(params['id'])))
+            elif parsed.path == '/api/verify':
+                self.json(self.store.verify(int(params['id'])))
+            elif parsed.path == '/api/correlate':
+                self.json(self.store.correlate(int(params['id']), params.get('seconds', 5), params.get('same_thread') == '1',
+                                               params.get('page', 1), params.get('kind', ''), params.get('size', 50)))
+            elif parsed.path == '/api/terminal/config':
+                self.json(self.server.terminals.config())
+            elif parsed.path == '/api/terminal/sessions':
+                self.json(self.server.terminals.list())
+            elif parsed.path == '/api/terminal/output':
+                self.json(self.server.terminals.get(params['id']).poll(params.get('cursor', 0)))
+            elif parsed.path == '/api/terminal/report':
+                self.json(self.server.terminals.report(params['id']))
             elif parsed.path == '/api/export':
                 iterator = self.store.export(params)
                 first = next(iterator, b'')
@@ -476,21 +579,23 @@ class Handler(BaseHTTPRequestHandler):
                 result['key_ready'] = bool(os.getenv('LOG_AI_API_KEY'))
                 self.json(result)
             else:
-                routes = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}
+                routes = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/terminal.js': 'terminal.js',
+                          '/vendor/xterm.js': 'vendor/xterm.js', '/vendor/xterm.css': 'vendor/xterm.css',
+                          '/vendor/addon-fit.js': 'vendor/addon-fit.js'}
                 if parsed.path not in routes:
                     return self.json({'error': '不存在'}, 404)
                 file = BASE / 'dist' / routes[parsed.path]
                 raw = file.read_bytes()
                 self.send_response(200)
                 self.send_header('Content-Type', {'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8'}[file.suffix])
-                self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+                self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
                 self.send_header('X-Content-Type-Options', 'nosniff')
                 self.send_header('Content-Length', str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
         except (BrokenPipeError, ConnectionResetError):
             pass
-        except (ValueError, KeyError, sqlite3.Error) as exc:
+        except (ValueError, KeyError, sqlite3.Error, OSError, zipfile.BadZipFile) as exc:
             self.json({'error': str(exc)}, 400)
     def do_POST(self):
         if not self.allowed():
@@ -523,8 +628,24 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 if size < 0 or size > 100000:
                     raise ValueError('请求过大')
+                if self.headers.get_content_type() != 'application/json':
+                    raise ValueError('需要 application/json 请求')
                 body = json.loads(self.rfile.read(size) or b'{}')
-                if parsed.path == '/api/ai/config':
+                if parsed.path == '/api/terminal/config':
+                    self.json(self.server.terminals.save_config(body))
+                elif parsed.path == '/api/terminal/start':
+                    self.json(self.server.terminals.start(body), 201)
+                elif parsed.path == '/api/terminal/input':
+                    self.server.terminals.get(body['id']).write(body.get('data', ''))
+                    self.json({'ok': True})
+                elif parsed.path == '/api/terminal/resize':
+                    cols, rows = dimensions(body.get('cols', 100), body.get('rows', 30))
+                    self.server.terminals.get(body['id']).pty.resize(cols, rows)
+                    self.json({'ok': True})
+                elif parsed.path == '/api/terminal/stop':
+                    self.server.terminals.get(body['id']).stop()
+                    self.json({'ok': True})
+                elif parsed.path == '/api/ai/config':
                     base_url = str(body.get('base_url', '')).strip().rstrip('/')
                     if base_url and (urlsplit(base_url).scheme not in ('http', 'https') or not urlsplit(base_url).hostname or urlsplit(base_url).username):
                         raise ValueError('模型地址需要是 http(s) URL')
@@ -538,18 +659,26 @@ class Handler(BaseHTTPRequestHandler):
                     self.json(ai_analyze(self.store, body))
                 else:
                     self.json({'error':'不存在'}, 404)
-        except (ValueError, KeyError, OSError) as exc:
+        except (ValueError, KeyError, OSError, EOFError) as exc:
             self.json({'error': str(exc)}, 400)
         finally:
             if temporary:
                 Path(temporary).unlink(missing_ok=True)
 
 
+class LocalServer(ThreadingHTTPServer):
+    def server_close(self):
+        if hasattr(self, 'terminals'):
+            self.terminals.close()
+        super().server_close()
+
+
 def make_server(directory, port=8765):
-    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    server = LocalServer(('127.0.0.1', port), Handler)
     server.store = Store(directory)
     port = server.server_address[1]
     server.allowed_hosts = {f'127.0.0.1:{port}', f'localhost:{port}'}
+    server.terminals = TerminalManager(server.store, f'http://127.0.0.1:{port}')
     return server
 
 

@@ -1,0 +1,2 @@
+# Only the interactive browser terminal on Windows needs this dependency.
+pywinpty==3.0.5; sys_platform == 'win32'

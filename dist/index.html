@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="LogScope 本地多节点日志分析，嵌套压缩包搜索与请求追踪"><title>LogScope · 日志分析工作台</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="LogScope 本地多节点日志分析，嵌套压缩包搜索与请求追踪"><title>LogScope · 日志分析工作台</title><link rel="stylesheet" href="/vendor/xterm.css"><link rel="stylesheet" href="/style.css"><script src="/vendor/xterm.js" defer></script><script src="/vendor/addon-fit.js" defer></script><script src="/app.js" defer></script><script src="/terminal.js" defer></script></head>
 <body>
 <div class="app-shell">
 <aside class="sidebar">
@@ -10,6 +10,7 @@
     <button class="nav active" data-view="search"><span>⌕</span>全局搜索<kbd>1</kbd></button>
     <button class="nav" data-view="trace"><span>⑂</span>流水号追踪<kbd>2</kbd></button>
     <button class="nav" data-view="files"><span>▤</span>日志文件<kbd>3</kbd></button>
+    <button class="nav" data-view="terminal"><span>▸</span>Agent 终端<small>CMD</small></button>
     <button class="nav" data-view="ai"><span>✧</span>AI 问诊<small>BETA</small></button>
   </nav>
   <div class="side-divider"></div>
@@ -17,7 +18,7 @@
   <select id="dataset" aria-label="选择日志包"><option value="">尚未导入日志包</option></select>
   <div id="datasetInfo" class="dataset-info">上传外层 ZIP，自动检索所有节点。</div>
   <button id="sideUpload" class="outline wide">＋ 导入日志包</button>
-  <div class="side-bottom"><div class="local-badge"><span></span> 本机存储 · 离线搜索</div><p>只有主动发起 AI 问诊时，才会向你配置的模型发送日志。</p><div class="version">LOGSCOPE <span>v1.0</span></div></div>
+  <div class="side-bottom"><div class="local-badge"><span></span> 本机存储 · 离线搜索</div><p>搜索在本机运行。AI 问诊或 Agent 分析时，会使用你配置的模型服务。</p><div class="version">LOGSCOPE <span>v1.1</span></div></div>
 </aside>
 <main>
   <header class="topbar"><div><span class="breadcrumb">工作空间</span><span class="slash">/</span><span id="viewLabel">全局搜索</span></div><button id="settings" class="quiet">⚙ 模型配置</button></header>
@@ -37,6 +38,21 @@
     </section>
     <section id="traceView" hidden><form id="traceForm" class="search-panel"><div class="search-tabs"><span class="selected">请求时间线</span><span class="subtle">按完整流水号跨节点匹配</span></div><div class="search-main"><span class="search-symbol">⑂</span><input id="traceId" placeholder="输入流水号，例如 9124859898865451127" aria-label="流水号" required><button class="primary">追踪请求 →</button></div><p class="form-note">按日志时间排列所有命中记录；不含流水号的 access 日志，可通过时间与线程另行关联。</p></form><div id="traceResults"></div></section>
     <section id="filesView" hidden><div class="file-toolbar"><h2>日志来源目录</h2><input id="fileSearch" placeholder="筛选 Pod、日志名或压缩包" aria-label="筛选日志文件"></div><div id="fileList"></div></section>
+    <section id="terminalView" hidden>
+      <div class="terminal-setup search-panel">
+        <div class="search-tabs"><span class="selected">本机交互终端</span><span class="subtle">真实 CMD / Shell · 支持输入、确认、追问与 Ctrl+C</span></div>
+        <div class="terminal-setup-grid"><label>启动命令<input id="terminalCommand" value="claude" placeholder="claude 或公司内部命令"></label><label>本次排查问题<input id="terminalQuestion" placeholder="例如 /api/model/map 为什么返回 500？"></label></div>
+        <div class="terminal-launch"><button class="primary" id="terminalStart">▸ 启动终端并运行</button><button class="quiet" id="shellStart">只打开 CMD / Shell</button><span id="terminalCapability" class="subtle"></span></div>
+        <p class="form-note">当前日志包和 Skill 会放进独立任务目录。Agent 启动完成后，点击「发送排查任务」。启动命令可直接换成公司的版本；不需要配置模型 API。</p>
+      </div>
+      <div class="terminal-workspace" id="terminalWorkspace">
+        <div class="terminal-toolbar"><div class="terminal-title"><span class="terminal-dot"></span><strong id="terminalState">尚未启动</strong><select id="terminalSessions" aria-label="选择终端会话"><option value="">选择会话</option></select></div><div class="terminal-actions"><button id="sendTask" disabled>发送排查任务</button><button id="interruptTerminal" disabled>Ctrl+C</button><button id="toggleFullscreen" aria-label="终端全屏">⛶ 全屏</button><button id="stopTerminal" disabled>结束终端</button></div></div>
+        <div id="terminalMount" aria-label="本机交互终端"></div>
+        <div class="terminal-footer"><span id="terminalCwd">终端尚未启动。页面将连接本机真实进程，不是模拟输出。</span><button id="copySelection">复制选中内容</button><button id="pasteTerminal">粘贴</button></div>
+      </div>
+      <div class="notice terminal-notice" id="terminalNotice">终端与本机 CMD 具有相同权限。日志发送到哪一个模型，取决于你启动的 Agent 配置。确认提示直接在终端内操作。</div>
+      <details class="report-panel"><summary>查看本次分析报告 <span>report.md</span></summary><div class="report-tools"><button class="text-button" id="refreshReport">刷新报告</button><button class="text-button" id="downloadReport">下载报告</button></div><pre id="terminalReport">Agent 写入 report.md 后，可在这里查看。终端内的分析回复也会正常显示。</pre></details>
+    </section>
     <section id="aiView" hidden><div class="ai-layout"><form id="aiForm" class="search-panel ai-form"><span class="pill blue">AI 问诊 · 可选</span><h2>让线索串起来</h2><p>先检索接口日志，提取状态与耗时，再关联同 Pod、相邻时间和线程下的业务日志。</p><label>接口路径<input id="aiEndpoint" placeholder="/api/model/map" required></label><label>你想排查的问题<textarea id="aiQuestion" rows="5" placeholder="这个接口为什么报错？帮我找出相关异常和可能原因。" required></textarea></label><label class="checkbox consent"><input type="checkbox" id="consent" required>本次允许将检索到的日志证据发送到配置的模型服务。</label><p class="form-note">仅做基础 Bearer 脱敏，请确认日志可发送。最多 60,000 字符证据，结果不代表全量日志。</p><button class="primary wide" id="analyzeButton">✧ 开始分析</button><button class="text-button" id="aiSettings" type="button">配置模型连接</button></form><div class="ai-output"><div class="ai-output-heading"><span>✧</span><h2>分析结果</h2></div><div id="aiAnswer" class="ai-answer">配置模型后，分析结果将在这里展示。<br><br>搜索与流水号追踪不依赖 AI，可以直接使用。</div></div></div></section>
   </div>
 </main>
