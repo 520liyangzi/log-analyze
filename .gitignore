@@ -1,0 +1,17 @@
+data/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.zip
+*.gz
+*.upload
+*.log
+.env
+.env.*
+ai-config.json
+__pycache__/
+*.py[cod]
+.venv/
+.vscode/
+.idea/
+.DS_Store
