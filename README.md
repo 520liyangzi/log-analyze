@@ -67,6 +67,16 @@ python demo.py
 6. ERROR 日志点击「追踪流水号」，或进入左侧追踪页输入 `9124859898865451127`：应显示跨 2 个 Pod 的 6 条记录，包含完整异常堆栈。
 7. 搜索 `gzip-history-hit`：应在 2 个节点的历史 `.log.gz` 中命中，来源显示外层 ZIP、内层 ZIP 和 GZIP 文件路径。
 
+还可以生成一份更接近所提供脱敏包的测试日志：
+
+```powershell
+python sample_logs.py
+```
+
+生成的 `generated-log-sample.zip` 完全是虚构数据，包含 2 个 Node、2 个 namespace/Pod/Service、access/root/rest/wsf 四类明文与 GZIP 日志，共 16 份文件。它包含 HTTP 500、HTTP 200 业务慢请求、异步线程 ERROR、19 位流水号、RouteID、Java 堆栈和历史压缩日志，可直接上传验证全局搜索与 AI 排查。
+
+建议依次测试：精确接口 `/api/model/map`（2 条 access，其中 1 条 500、耗时 3012 ms）；流水号 `9125008448899317884`（跨两个 Pod 共 8 条）；关键词 `synthetic gzip history marker`（两个 Node 的 wsf GZIP）；接口 `/api/rest/example/v2/query/chat-task`（Node01 为 HTTP 200、3155 ms，附近存在异步线程 ERROR，应该标为候选关系）。
+
 ## v1.2：按提供的脱敏包修正
 
 - namespace / Pod 通过 `pod-service` 目录交叉核对，支持 namespace 含下划线。
@@ -211,6 +221,7 @@ app.py              HTTP API、ZIP/GZIP 导入、SQLite 搜索、解析和 AI �
  dist/style.css     响应式样式
  dist/app.js        上传、筛选、分页、时间线、关联、配置
  demo.py            生成可复现的模拟日志包
+ sample_logs.py     生成接近脱敏附件结构的综合测试日志包
  tests/             搜索、核验、CLI、真实 PTY 输入输出与中断等测试
  analysis_rules.py  规则版本存储和任务提示词组装
  prompts/           默认分析流程和稳定工具说明
