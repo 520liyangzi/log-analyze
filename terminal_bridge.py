@@ -13,7 +13,8 @@ import sys
 import threading
 import time
 import uuid
-from analysis_rules import AnalysisRules, atomic_json, render_rules, render_task
+from analysis_rules import AnalysisRules, atomic_json, render_code_task, render_rules, render_task
+from project_access import inspect_repository, select_revision
 
 BASE = Path(__file__).resolve().parent
 TASK_PROMPT = 'Read task.md in the current directory. Use its rules and query tools to investigate the question. Reply in Chinese and write report.md.'
@@ -136,6 +137,7 @@ class Session:
         self.task = task or {}
         self.launch_mode = launch_mode
         self.rule_updates = []
+        self.code_tasks = []
         self.reader = threading.Thread(target=self.read_loop, daemon=True)
         self.reader.start()
 
@@ -170,7 +172,7 @@ class Session:
                     created=self.created, cwd=str(self.directory), pid=self.pty.pid,
                     name=self.task.get('name', ''), question=self.task.get('question', ''),
                     rules_version=self.task.get('rules_version'), launch_mode=self.launch_mode,
-                    rule_updates=list(self.rule_updates))
+                    rule_updates=list(self.rule_updates), code_tasks=list(self.code_tasks))
 
     def poll(self, cursor):
         with self.lock:
@@ -250,8 +252,15 @@ class TerminalManager:
             self.store.require_ready(db, dataset)
             name = db.execute('SELECT name FROM datasets WHERE id=?', (dataset,)).fetchone()['name']
         rules = self.rules.snapshot(body.get('rules_version'))
+        endpoints = []
+        for value in re.findall(r'(?<![A-Za-z0-9_])(/[A-Za-z0-9_./?=&%:+~-]+)', question):
+            value = value.rstrip('.,;，。；：:!?！？')
+            if value and value not in endpoints:
+                endpoints.append(value)
+        trace_ids = list(dict.fromkeys(re.findall(r'(?<!\d)\d{15,}(?!\d)', question)))
         task = dict(dataset=dataset, name=name, url=self.url, question=question, python=sys.executable,
-                    rules_version=rules['version'])
+                    rules_version=rules['version'], scope=self.store.dataset_scope(dataset),
+                    query_hints={'endpoints': endpoints[:20], 'trace_ids': trace_ids[:20]})
         return task, rules, render_task(task, rules)
 
     def preview(self, body):
@@ -275,6 +284,7 @@ class TerminalManager:
             shutil.copytree(BASE / 'skills' / 'logscope', skill, ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
             (directory / 'tools').mkdir()
             shutil.copyfile(BASE / 'skills/logscope/scripts/logscope.py', directory / 'tools/logscope.py')
+            shutil.copyfile(BASE / 'skills/logscope/scripts/project.py', directory / 'tools/project.py')
             atomic_json(directory / 'rules.json', rules)
             (directory / 'task.json').write_text(json.dumps(task, ensure_ascii=False, indent=2), 'utf-8')
             (directory / 'task.md').write_text(task_text, 'utf-8')
@@ -297,7 +307,51 @@ class TerminalManager:
         session = self.get(identifier)
         with session.lock:
             return dict(task=session.task, text=(session.directory / 'task.md').read_text('utf-8'),
-                        rule_updates=list(session.rule_updates))
+                        rule_updates=list(session.rule_updates), code_tasks=list(session.code_tasks))
+
+    def project_branches(self, path):
+        return inspect_repository(path)
+
+    def prepare_code(self, body):
+        session = self.get(body.get('id', ''))
+        with session.lock:
+            if session.state != 'running':
+                raise ValueError('AI 终端已结束，请先回到运行中的日志排查会话')
+            report = self.report(session.id)
+            if not report['available']:
+                raise ValueError('日志分析报告还没有生成，请等待 report.md 后再继续代码定位')
+            repository = select_revision(str(body.get('project_path', '')), str(body.get('branch', '')))
+            expected = str(body.get('commit', '')).strip()
+            if expected and expected != repository['commit']:
+                raise ValueError('所选分支在预览后发生了变化，请重新生成任务预览')
+            task = dict(project_root=repository['root'], branch=repository['branch'], commit=repository['commit'],
+                        question=session.task.get('question', ''), log_report='report.md',
+                        log_dataset=session.task.get('name', ''), read_only=True)
+            return session, task, render_code_task(task)
+
+    def preview_code(self, body):
+        _, task, text = self.prepare_code(body)
+        return dict(task=task, text=text)
+
+    def create_code_task(self, body):
+        session, task, text = self.prepare_code(body)
+        with session.lock:
+            number = len(session.code_tasks) + 1
+            filename = 'code-task.md' if number == 1 else f'code-task-{number:04d}.md'
+            json_name = filename.removesuffix('.md') + '.json'
+            atomic_json(session.directory / json_name, task)
+            (session.directory / filename).write_text(text, 'utf-8')
+            # The CLI always reads code-task.json so each explicitly confirmed
+            # follow-up becomes the active fixed revision without checking it out.
+            atomic_json(session.directory / 'code-task.json', task)
+            entry = dict(file=filename, json=json_name, project_root=task['project_root'],
+                         branch=task['branch'], commit=task['commit'], created=AnalysisRules.now())
+            session.code_tasks.append(entry)
+            atomic_json(session.directory / 'code-tasks.json', session.code_tasks)
+            prompt = (f'Read {filename} and report.md in the current directory. '
+                      'Use tools/project.py to investigate the fixed code revision. '
+                      'Reply in Chinese and update report.md with a separate code-location section.')
+            return dict(task=task, text=text, prompt=prompt, entry=entry)
 
     def update_rules(self, body):
         session = self.get(body['id'])

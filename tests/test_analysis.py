@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from analysis_rules import AnalysisRules
@@ -85,6 +86,8 @@ class AnalysisTests(unittest.TestCase):
         body = dict(dataset=self.dataset, question='查一下 /api/model/map', rules_version=initial['version'])
         before = len(self.api('/api/terminal/sessions'))
         preview = self.api('/api/terminal/preview', body)
+        self.assertIn('scope', preview['task'])
+        self.assertIn('/api/model/map', preview['task']['query_hints']['endpoints'])
         self.assertEqual(len(self.api('/api/terminal/sessions')), before)
         self.save_rules('稍后新保存的约定')
         session = self.api('/api/terminal/start', dict(body, run_command=False))
@@ -154,6 +157,47 @@ print('FOLLOWUP_'+answer,flush=True)
                 self.api('/api/terminal/stop', dict(id=manual['id']))
         finally:
             self.api('/api/terminal/config', old_config)
+
+    def test_code_followup_preview_fixed_branch_and_read_only_query(self):
+        repository = Path(self.temp.name) / 'business project'
+        repository.mkdir()
+        subprocess.run(['git', 'init', '-b', 'main'], cwd=repository, check=True, capture_output=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@example.invalid'], cwd=repository, check=True)
+        subprocess.run(['git', 'config', 'user.name', 'LogScope Test'], cwd=repository, check=True)
+        source = repository / 'OrderService.java'
+        source.write_text('class OrderService { void failOrder() { throw new RuntimeException("E102"); } }\n', 'utf-8')
+        subprocess.run(['git', 'add', 'OrderService.java'], cwd=repository, check=True)
+        subprocess.run(['git', 'commit', '-m', 'initial'], cwd=repository, check=True, capture_output=True)
+        branches = self.api('/api/project/branches?path=' + quote(str(repository)))
+        self.assertEqual(branches['current'], 'main')
+        self.assertIn('main', branches['branches'])
+        with self.assertRaises(HTTPError):
+            self.api('/api/project/branches?path=' + quote(str(Path(self.temp.name))))
+        session = self.api('/api/terminal/start', dict(dataset=self.dataset, question='日志出现 E102', run_command=False))
+        try:
+            directory = Path(session['cwd'])
+            with self.assertRaises(HTTPError):
+                self.api('/api/terminal/code-preview', dict(id=session['id'], project_path=str(repository), branch='main'))
+            (directory / 'report.md').write_text('# 日志结论\nE102 出现在 OrderService。', 'utf-8')
+            body = dict(id=session['id'], project_path=str(repository), branch='main')
+            preview = self.api('/api/terminal/code-preview', body)
+            self.assertIn(preview['task']['commit'], preview['text'])
+            created = self.api('/api/terminal/code-task', dict(body, commit=preview['task']['commit']))
+            self.assertTrue((directory / 'code-task.md').exists())
+            self.assertEqual(created['task']['commit'], preview['task']['commit'])
+            self.assertEqual((directory / 'code-task.md').read_text('utf-8'), preview['text'])
+            result = subprocess.run([sys.executable, str(directory / 'tools/project.py'), 'grep', 'E102'],
+                                    cwd=directory, text=True, encoding='utf-8', capture_output=True, check=True)
+            self.assertIn('OrderService.java', json.loads(result.stdout)['matches'][0])
+            source.write_text(source.read_text('utf-8') + '// moved\n', 'utf-8')
+            subprocess.run(['git', 'add', 'OrderService.java'], cwd=repository, check=True)
+            subprocess.run(['git', 'commit', '-m', 'move branch'], cwd=repository, check=True, capture_output=True)
+            with self.assertRaises(HTTPError):
+                self.api('/api/terminal/code-task', dict(body, commit=preview['task']['commit']))
+        finally:
+            self.api('/api/terminal/stop', dict(id=session['id']))
+        with self.assertRaises(HTTPError):
+            self.api('/api/terminal/code-preview', dict(id=session['id'], project_path=str(repository), branch='main'))
 
 
 if __name__ == '__main__':

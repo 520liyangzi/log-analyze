@@ -141,6 +141,7 @@ class Store:
                 trace TEXT, span TEXT, method TEXT, url TEXT, status INTEGER, duration REAL, raw TEXT);
               CREATE INDEX IF NOT EXISTS logs_dataset_time ON logs(dataset,ts,id);
               CREATE INDEX IF NOT EXISTS logs_trace ON logs(dataset,trace,ts);
+              CREATE INDEX IF NOT EXISTS logs_url ON logs(dataset,url) WHERE url != '';
               CREATE INDEX IF NOT EXISTS logs_file_line ON logs(file_id,line);
               CREATE INDEX IF NOT EXISTS files_scope ON files(dataset,node,pod,kind);
             ''')
@@ -390,6 +391,24 @@ class Store:
             self.require_ready(db, identifier)
             return [dict(row) for row in db.execute('SELECT * FROM files WHERE dataset=? ORDER BY node,pod,kind,filename', (identifier,))]
 
+    def dataset_scope(self, identifier):
+        """Small task snapshot so an Agent does not spend turns rediscovering the index."""
+        with self.connect() as db:
+            self.require_ready(db, identifier)
+            dataset = dict(db.execute('SELECT name,files,records,warnings,audit,parser_version FROM datasets WHERE id=?',
+                                      (identifier,)).fetchone())
+            dimensions = {}
+            for column in ('node', 'namespace', 'pod', 'service', 'kind'):
+                values = [row[0] for row in db.execute(
+                    f'SELECT DISTINCT {column} FROM files WHERE dataset=? ORDER BY {column} LIMIT 201', (identifier,))]
+                dimensions[column + 's'] = values[:200]
+                if len(values) > 200:
+                    dimensions[column + 's_truncated'] = True
+        dataset['warnings'] = json.loads(dataset['warnings'])
+        dataset['audit'] = json.loads(dataset['audit'])
+        dataset.update(dimensions)
+        return dataset
+
     def query_parts(self, params):
         identifier = params.get('dataset', '')
         clauses, args = ['l.dataset=?'], [identifier]
@@ -408,8 +427,12 @@ class Store:
             clauses.append('(l.route_id=? OR l.request_id=?)')
             args.extend([params['request_key'], params['request_key']])
         if params.get('endpoint'):
-            clauses.append("substr(l.url,1,instr(l.url || '?','?')-1)=?")
-            args.append(params['endpoint'].split('?', 1)[0])
+            endpoint = params['endpoint'].split('?', 1)[0]
+            # This form can use logs_url for both an exact URL and the same path
+            # followed by a query string; the previous substr expression could not.
+            clauses.append("l.url!='' AND l.url>=? AND l.url<? AND "
+                           "(l.url=? OR substr(l.url,length(?)+1,1)='?')")
+            args.extend([endpoint, endpoint + '@', endpoint, endpoint])
         if params.get('filename'):
             clauses.append('f.filename GLOB ?')
             args.append(params['filename'])
@@ -636,7 +659,7 @@ def ai_analyze(store, payload):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.4'
+    server_version = 'LogScope/1.5'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -696,6 +719,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(self.server.terminals.get(params['id']).poll(params.get('cursor', 0)))
             elif parsed.path == '/api/terminal/report':
                 self.json(self.server.terminals.report(params['id']))
+            elif parsed.path == '/api/project/branches':
+                self.json(self.server.terminals.project_branches(params.get('path', '')))
             elif parsed.path == '/api/export':
                 iterator = self.store.export(params)
                 first = next(iterator, b'')
@@ -776,6 +801,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.json(self.server.terminals.rules.save(body))
                 elif parsed.path == '/api/terminal/preview':
                     self.json(self.server.terminals.preview(body))
+                elif parsed.path == '/api/terminal/code-preview':
+                    self.json(self.server.terminals.preview_code(body))
+                elif parsed.path == '/api/terminal/code-task':
+                    self.json(self.server.terminals.create_code_task(body))
                 elif parsed.path == '/api/terminal/rules':
                     self.json(self.server.terminals.update_rules(body))
                 elif parsed.path == '/api/terminal/start':

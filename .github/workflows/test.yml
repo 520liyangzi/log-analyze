@@ -16,7 +16,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -r requirements.txt
       - run: python -m unittest discover -s tests -v
-      - run: python -m py_compile app.py analysis_rules.py demo.py sample_logs.py terminal_bridge.py terminal_child.py install_skill.py skills/logscope/scripts/logscope.py
+      - run: python -m py_compile app.py analysis_rules.py demo.py sample_logs.py terminal_bridge.py terminal_child.py project_access.py install_skill.py skills/logscope/scripts/logscope.py skills/logscope/scripts/project.py
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

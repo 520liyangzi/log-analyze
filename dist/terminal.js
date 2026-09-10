@@ -3,10 +3,11 @@
 (() => {
   let term, fit, sessionId='', cursor=0, timer, running=false, pollGeneration=0;
   let inputQueue='', sending=false, resizeTimer, reportText='', currentInfo=null, available=false;
-  let rules=null, editorBase=0, editorDirty=false, previewText='', lastReportAt=0, starting=false;
+  let rules=null, editorBase=0, editorDirty=false, previewText='', previewAction=null, projectSnapshot=null, lastReportAt=0, starting=false;
   const request=api;
   const draftKey='logscopeAnalysisQuestion';
   $('#terminalQuestion').value=localStorage.getItem(draftKey)||'';
+  $('#projectPath').value=localStorage.getItem('logscopeProjectPath')||'';
   $('#terminalQuestion').addEventListener('input',()=>localStorage.setItem(draftKey,$('#terminalQuestion').value));
   function notice(text){$('#terminalNotice').textContent=text;}
   function datasetLabel(){
@@ -109,15 +110,15 @@
   function taskBody(){
     return {dataset:state.dataset,question:$('#terminalQuestion').value.trim(),rules_version:rules?.version};
   }
-  async function start(runCommand) {
+  async function start(runCommand,preparedBody=null) {
     if(!needDataset()||starting)return;
     if(runCommand&&!$('#terminalQuestion').value.trim()){toast('先写下你想排查的问题');$('#terminalQuestion').focus();return;}
     if(runCommand&&!$('#terminalCommand').value.trim()){toast('请设置本机 AI 启动命令');$('#agentSettings').open=true;$('#terminalCommand').focus();return;}
     starting=true;initialize();$('#terminalStart').disabled=true;$('#shellStart').disabled=true;
     try{
       if(sending)throw new Error('输入正在发送，请稍后新建终端');
-      await saveSettings();await refreshRules();fit.fit();
-      const info=await request('/api/terminal/start',{...taskBody(),cols:term.cols,rows:term.rows,run_command:runCommand});
+      await saveSettings();if(!preparedBody)await refreshRules();fit.fit();
+      const info=await request('/api/terminal/start',{...(preparedBody||taskBody()),cols:term.cols,rows:term.rows,run_command:runCommand});
       await connect(info);
       notice(info.launch_mode==='argument'?'任务已随启动命令传入。请在终端完成首次登录或权限确认，AI 会读取任务；之后可直接追问。若命令不支持启动问题，请在启动设置切换兼容模式。':'任务已准备好。先等 AI 进入对话界面，再点击「AI 就绪后发送任务」。只打开 Shell 时，请先输入你的 AI 启动命令。');
     }catch(e){notice(e.message);toast(e.message);}
@@ -133,6 +134,7 @@
       const first=!reportText&&result.available&&result.text;
       reportText=result.available?result.text:'';
       $('#terminalReport').textContent=result.available?result.text:'等待 AI 保存报告。你也可以在终端里让它将完整结果写入 report.md，保存后这里会自动更新。';
+      $('#codeInvestigation').hidden=!result.available;
       if(first){$('#reportPanel').open=true;toast('本次分析报告已生成');}
     }catch(e){if(!quiet)toast(e.message);}
   }
@@ -150,11 +152,25 @@
       $('#rulesDialog').showModal();
     }catch(e){toast(e.message);}
   }
-  function showPreview(text,title,note){
-    previewText=text;$('#taskPreviewTitle').textContent=title;$('#taskPreviewNote').textContent=note;
+  function showPreview(text,title,note,action=null){
+    previewText=text;previewAction=action;$('#taskPreviewTitle').textContent=title;$('#taskPreviewNote').textContent=note;
     $('#taskPreviewText').textContent=text;$('#taskPreviewDialog').showModal();
+    $('#confirmTaskPreview').hidden=!action;
+    $('#confirmTaskPreview').textContent=action?.kind==='code'?'确认并发送代码定位任务':'确认并启动 AI';
+    $('#taskPreviewSafety').textContent=action?'请核对内容；只有点击右侧确认按钮才会发送。':'当前仅供查看，尚未发送给 AI。';
   }
-  $('#terminalStart').addEventListener('click',()=>start(true));
+  async function previewBeforeStart(){
+    if(!needDataset()||starting)return;
+    if(!$('#terminalQuestion').value.trim()){toast('先写下你想排查的问题');$('#terminalQuestion').focus();return;}
+    if(!$('#terminalCommand').value.trim()){toast('请设置本机 AI 启动命令');$('#agentSettings').open=true;$('#terminalCommand').focus();return;}
+    starting=true;$('#terminalStart').disabled=true;
+    try{
+      await refreshRules();const body=taskBody();const result=await request('/api/terminal/preview',body);
+      showPreview(result.text,'启动前预览 task.md','日志范围、查询线索、分析规则和可用命令都会原样写入任务文件。确认前不会启动 AI。',{kind:'start',body});
+    }catch(e){toast(e.message);}
+    finally{starting=false;$('#terminalStart').disabled=!available;}
+  }
+  $('#terminalStart').addEventListener('click',previewBeforeStart);
   $('#shellStart').addEventListener('click',()=>start(false));
   $('#saveTerminalSettings').addEventListener('click',async()=>{try{await saveSettings();toast('启动设置已保存');}catch(e){toast(e.message);}});
   $('#terminalCommand').addEventListener('input',launchLabel);$('#terminalLaunchMode').addEventListener('change',launchLabel);
@@ -193,6 +209,44 @@
   $('#previewTask').addEventListener('click',async()=>{
     if(!needDataset())return;
     try{await refreshRules();const result=await request('/api/terminal/preview',taskBody());showPreview(result.text,'新任务预览','这里使用已保存的规则 v'+result.rules.version+'。尚未启动 AI，也没有发送日志。');}catch(e){toast(e.message);}
+  });
+  $('#confirmTaskPreview').addEventListener('click',async()=>{
+    if(!previewAction)return;
+    const action=previewAction,button=$('#confirmTaskPreview');button.disabled=true;
+    try{
+      if(action.kind==='start'){
+        $('#taskPreviewDialog').close();previewAction=null;await start(true,action.body);
+      }else if(action.kind==='code'){
+        if(!sessionId||!running)throw new Error('AI 终端已经结束，请先选择运行中的会话');
+        const result=await request('/api/terminal/code-task',action.body);
+        await queueInput(result.prompt+'\r');$('#taskPreviewDialog').close();previewAction=null;term.focus();
+        notice(`代码定位任务已发送：${result.task.branch} @ ${result.task.commit.slice(0,12)}。AI 会继续更新 report.md。`);
+        toast('代码定位任务已发送给当前 AI');
+      }
+    }catch(e){notice(e.message);toast(e.message);}
+    finally{button.disabled=false;}
+  });
+  async function loadProjectBranches(){
+    const path=$('#projectPath').value.trim();if(!path){toast('请填写项目的绝对路径');$('#projectPath').focus();return;}
+    $('#projectBranch').disabled=true;$('#previewCodeTask').disabled=true;$('#projectStatus').textContent='正在读取 Git 分支…';
+    try{
+      projectSnapshot=await request('/api/project/branches?'+paramsURL({path}));
+      localStorage.setItem('logscopeProjectPath',projectSnapshot.root);$('#projectPath').value=projectSnapshot.root;
+      $('#projectBranch').innerHTML=projectSnapshot.branches.map(branch=>`<option value="${escapeHTML(branch)}">${escapeHTML(branch)}${branch===projectSnapshot.current?' · 当前分支':''}</option>`).join('');
+      $('#projectBranch').disabled=false;$('#previewCodeTask').disabled=false;
+      $('#projectStatus').textContent=`已识别 ${projectSnapshot.branches.length} 个分支；代码定位固定到提交，不切换你的工作区。`;
+    }catch(e){projectSnapshot=null;$('#projectStatus').textContent=e.message;toast(e.message);}
+  }
+  $('#projectPath').addEventListener('input',()=>{projectSnapshot=null;$('#projectBranch').disabled=true;$('#previewCodeTask').disabled=true;localStorage.setItem('logscopeProjectPath',$('#projectPath').value);});
+  $('#loadProjectBranches').addEventListener('click',loadProjectBranches);
+  $('#previewCodeTask').addEventListener('click',async()=>{
+    if(!sessionId||!running)return toast('请先选择正在运行的 AI 排查会话');
+    if(!projectSnapshot)return loadProjectBranches();
+    const body={id:sessionId,project_path:projectSnapshot.root,branch:$('#projectBranch').value};
+    try{
+      const result=await request('/api/terminal/code-preview',body);
+      showPreview(result.text,'发送前预览 code-task.md',`将基于日志报告检查 ${result.task.branch}，固定提交 ${result.task.commit.slice(0,12)}。确认前不会把任务发送给 AI。`,{kind:'code',body:{...body,commit:result.task.commit}});
+    }catch(e){toast(e.message);$('#projectStatus').textContent=e.message;}
   });
   $('#viewSessionTask').addEventListener('click',async()=>{
     try{
