@@ -27,6 +27,8 @@ LEVEL = re.compile(r'\b(TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\b')
 EXTRA_FIELDS = dict(thread_id='TEXT', route_id='TEXT', request_id='TEXT', response_size='INTEGER',
                     code_file='TEXT', logger='TEXT', code_method='TEXT', code_line='INTEGER', module='TEXT')
 PARSER_VERSION = 2
+INDEX_VERSION = 2
+IMPORT_BATCH_SIZE = 5000
 
 
 def timestamp(value, offset='+0800'):
@@ -152,24 +154,37 @@ class Store:
                 if key not in columns:
                     db.execute(f'ALTER TABLE logs ADD COLUMN {key} {kind}')
             dataset_columns = {r['name'] for r in db.execute('PRAGMA table_info(datasets)')}
-            for key, kind in [('parser_version', 'INTEGER DEFAULT 1'), ('audit', "TEXT DEFAULT '{}' ")]:
+            for key, kind in [('parser_version', 'INTEGER DEFAULT 1'), ('index_version', 'INTEGER DEFAULT 1'),
+                              ('audit', "TEXT DEFAULT '{}' ")]:
                 if key not in dataset_columns:
                     db.execute(f'ALTER TABLE datasets ADD COLUMN {key} {kind}')
             db.execute('CREATE INDEX IF NOT EXISTS logs_route ON logs(dataset,route_id)')
             db.execute('CREATE INDEX IF NOT EXISTS logs_request_id ON logs(dataset,request_id)')
             db.execute("UPDATE datasets SET state='failed', error='上次导入被中断，请重新上传' WHERE state='importing'")
-        self.fts = False
+        self.fts_tables = []
         with self.connect() as db:
+            # Keep the old content-copying FTS table readable, but use an
+            # external-content table for new imports so raw text is stored once.
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='log_fts'").fetchone():
+                self.fts_tables.append('log_fts')
             try:
-                db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS log_fts USING fts5(raw, tokenize='trigram')")
-                self.fts = True
+                db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS log_fts_v2 USING fts5("
+                           "raw, content='logs', content_rowid='id', tokenize='trigram', "
+                           "detail='none', columnsize=0)")
+                self.fts_tables.insert(0, 'log_fts_v2')
             except sqlite3.OperationalError:
                 pass
+        self.fts = bool(self.fts_tables)
+        self.write_fts = 'log_fts_v2' if 'log_fts_v2' in self.fts_tables else (
+            'log_fts' if 'log_fts' in self.fts_tables else '')
 
     @contextlib.contextmanager
     def connect(self):
         db = sqlite3.connect(self.database, timeout=60)
         db.row_factory = sqlite3.Row
+        db.execute('PRAGMA synchronous=NORMAL')
+        db.execute('PRAGMA cache_size=-32768')
+        db.execute('PRAGMA temp_store=FILE')
         try:
             yield db
             db.commit()
@@ -188,8 +203,9 @@ class Store:
             raise ValueError('耗时单位无效')
         identifier = uuid.uuid4().hex
         with self.connect() as db:
-            db.execute('INSERT INTO datasets(id,name,state,created) VALUES(?,?,?,?)',
-                       (identifier, name, 'importing', dt.datetime.now(dt.timezone.utc).isoformat()))
+            db.execute('INSERT INTO datasets(id,name,state,created,index_version) VALUES(?,?,?,?,?)',
+                       (identifier, name, 'importing', dt.datetime.now(dt.timezone.utc).isoformat(),
+                        INDEX_VERSION if self.write_fts == 'log_fts_v2' else 1))
         self.pool.submit(self.ingest, identifier, path, name, encoding, offset, unit)
         return identifier
 
@@ -199,19 +215,46 @@ class Store:
         audit = dict(manifest_present=False, recognized_time=0, unrecognized_time=0, physical_lines=0)
         maximum = int(os.getenv('LOG_MAX_EXPANDED_GB', '20')) * 1024 ** 3
         max_record = int(os.getenv('LOG_MAX_RECORD_MB', '8')) * 1024 ** 2
+        started = time.monotonic()
         try:
             with self.connect() as db:
+                base = ('ts','time','level','thread','trace','span','method','url','status','duration')
+                columns = ('id','dataset','file_id','line','end_line',*base,*EXTRA_FIELDS.keys(),'raw')
+                insert_logs = ('INSERT INTO logs(' + ','.join(columns) + ') VALUES('
+                               + ','.join('?' for _ in columns) + ')')
+                next_log_id = db.execute('SELECT COALESCE(MAX(id),0)+1 FROM logs').fetchone()[0]
+                records_buffer = []
+                fts_buffer = []
+
+                def publish_progress(current=''):
+                    elapsed = max(.001, time.monotonic() - started)
+                    self.progress[identifier] = dict(
+                        stats, current=current, elapsed_seconds=round(elapsed, 1),
+                        records_per_second=round(stats['records'] / elapsed))
+
+                def flush_records():
+                    if not records_buffer:
+                        return
+                    db.executemany(insert_logs, records_buffer)
+                    if self.write_fts:
+                        db.executemany(f'INSERT INTO {self.write_fts}(rowid,raw) VALUES(?,?)', fts_buffer)
+                    records_buffer.clear()
+                    fts_buffer.clear()
+                    # Bound WAL growth and make long imports release Python row buffers.
+                    db.commit()
+
                 def add_record(fid, line, end_line, raw, parsed):
-                    base = ('ts','time','level','thread','trace','span','method','url','status','duration')
-                    columns = ('dataset','file_id','line','end_line',*base,*EXTRA_FIELDS.keys(),'raw')
-                    values = (identifier, fid, line, end_line,
+                    nonlocal next_log_id
+                    values = (next_log_id, identifier, fid, line, end_line,
                               *[parsed[k] for k in base], *[parsed[k] for k in EXTRA_FIELDS], raw)
-                    cursor = db.execute('INSERT INTO logs(' + ','.join(columns) + ') VALUES('
-                                        + ','.join('?' for _ in columns) + ')', values)
-                    if self.fts:
-                        db.execute('INSERT INTO log_fts(rowid,raw) VALUES(?,?)', (cursor.lastrowid, raw))
+                    records_buffer.append(values)
+                    if self.write_fts:
+                        fts_buffer.append((next_log_id, raw))
+                    next_log_id += 1
                     audit['recognized_time' if parsed['ts'] is not None else 'unrecognized_time'] += 1
                     stats['records'] += 1
+                    if len(records_buffer) >= IMPORT_BATCH_SIZE:
+                        flush_records()
 
                 def read_log(stream, meta, chain):
                     cursor = db.execute('INSERT INTO files(dataset,node,namespace,pod,service,kind,filename,archive,path,source,encoding) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
@@ -251,14 +294,15 @@ class Store:
                         if size > max_record:
                             raise ValueError('单条多行日志超过限制，请调整 LOG_MAX_RECORD_MB')
                         if number % 10000 == 0:
-                            self.progress[identifier] = dict(stats, current=meta['filename'])
+                            publish_progress(meta['filename'])
                     if pending:
                         add_record(fid, start, end, '\n'.join(pending), parsed)
+                    flush_records()
                     db.execute('UPDATE files SET records=? WHERE id=?', (stats['records'] - before, fid))
                     stats['files'] += 1
                     audit['physical_lines'] += end
                     actual_paths.add('/'.join([*chain[1:], meta['path']]).replace('\\', '/'))
-                    self.progress[identifier] = dict(stats, current=meta['filename'])
+                    publish_progress(meta['filename'])
 
                 def walk(archive, chain, depth=0):
                     if depth > 4:
@@ -308,6 +352,7 @@ class Store:
                                             for line in content.decode('utf-8-sig', errors='replace').splitlines() if line.strip()}
                             audit['manifest_checked'] = True
                     walk(archive, [name])
+                flush_records()
                 if not stats['files']:
                     raise ValueError('未找到符合 namespace_pod/service/pod-service/log/ 结构的日志')
                 # Publish the original archive before committing the searchable dataset.
@@ -321,9 +366,21 @@ class Store:
                 db.execute("UPDATE datasets SET state='ready',files=?,records=?,warnings=?,parser_version=?,audit=? WHERE id=?",
                            (stats['files'], stats['records'], json.dumps(warnings, ensure_ascii=False), PARSER_VERSION,
                             json.dumps(audit, ensure_ascii=False), identifier))
+            try:
+                with self.connect() as db:
+                    db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            except sqlite3.Error:
+                pass
         except Exception as exc:
             (self.directory / 'archives' / (identifier + '.zip')).unlink(missing_ok=True)
             with self.connect() as db:
+                # Batches are committed during import to cap WAL size, so remove
+                # any partial rows before exposing the failed dataset.
+                for table in self.fts_tables:
+                    db.execute(f'DELETE FROM {table} WHERE rowid IN '
+                               '(SELECT id FROM logs WHERE dataset=?)', (identifier,))
+                db.execute('DELETE FROM logs WHERE dataset=?', (identifier,))
+                db.execute('DELETE FROM files WHERE dataset=?', (identifier,))
                 db.execute("UPDATE datasets SET state='failed',error=? WHERE id=?", (str(exc), identifier))
         finally:
             Path(path).unlink(missing_ok=True)
@@ -337,6 +394,8 @@ class Store:
             row['audit'] = json.loads(row['audit'])
             if row['parser_version'] < PARSER_VERSION:
                 row['warnings'].append('该日志包使用旧版解析器，请重新上传以修正 Pod 并补充 RouteID 等新字段。')
+            if row['index_version'] < INDEX_VERSION:
+                row['warnings'].append('该日志包使用旧版全文索引；仍可正常搜索，重新导入可减少磁盘占用并加快导入。')
             row['progress'] = self.progress.get(row['id'])
             archive = self.directory / 'archives' / (row['id'] + '.zip')
             row['archive_bytes'] = archive.stat().st_size if archive.exists() else 0
@@ -357,9 +416,9 @@ class Store:
     def delete_dataset(self, identifier, previous_state='ready'):
         try:
             with self.connect() as db:
-                if self.fts:
-                    db.execute('DELETE FROM log_fts WHERE rowid IN (SELECT id FROM logs WHERE dataset=?)',
-                               (identifier,))
+                for table in self.fts_tables:
+                    db.execute(f'DELETE FROM {table} WHERE rowid IN '
+                               '(SELECT id FROM logs WHERE dataset=?)', (identifier,))
                 db.execute('DELETE FROM logs WHERE dataset=?', (identifier,))
                 db.execute('DELETE FROM files WHERE dataset=?', (identifier,))
             (self.directory / 'archives' / (identifier + '.zip')).unlink(missing_ok=True)
@@ -460,8 +519,21 @@ class Store:
             raise ValueError('搜索词最多 2000 个字符')
         if keyword:
             if self.fts and params.get('scan') != '1' and len(keyword) >= 3 and '\n' not in keyword:
-                clauses.append('l.id IN (SELECT rowid FROM log_fts WHERE log_fts MATCH ?)')
-                args.append('"' + keyword.replace('"', '""') + '"')
+                phrase = '"' + keyword.replace('"', '""') + '"'
+                searches, search_args = [], []
+                for table in self.fts_tables:
+                    if table == 'log_fts_v2':
+                        # Trigram-backed LIKE keeps literal %, _ and punctuation
+                        # searches exact while detail=none avoids position lists.
+                        pattern = ('%' + keyword.replace('\\', '\\\\')
+                                   .replace('%', '\\%').replace('_', '\\_') + '%')
+                        searches.append("SELECT rowid FROM log_fts_v2 WHERE raw LIKE ? ESCAPE '\\'")
+                        search_args.append(pattern)
+                    else:
+                        searches.append(f'SELECT rowid FROM {table} WHERE {table} MATCH ?')
+                        search_args.append(phrase)
+                clauses.append('l.id IN (' + ' UNION '.join(searches) + ')')
+                args.extend(search_args)
             clauses.append('instr(l.raw,?)>0' if params.get('case') == '1' else 'instr(lower(l.raw),lower(?))>0')
             args.append(keyword)
         return ' AND '.join(clauses), args
@@ -593,7 +665,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.13'
+    server_version = 'LogScope/1.14'
     def log_message(self, fmt, *args):
         pass
     @property

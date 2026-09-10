@@ -89,6 +89,48 @@ class FormatTests(unittest.TestCase):
             finally:
                 reopened.pool.shutdown(wait=True)
 
+    def test_compact_index_stores_raw_once_and_preserves_literal_search(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive=Path(tmp)/'compact.zip'
+            with zipfile.ZipFile(archive,'w') as outer:
+                outer.writestr('ns_pod/svc/pod-svc/log/root.log',
+                               '[2026-09-08 09:00:00.000 +0800] [1] [1] [INFO] [worker] literal 100% x_y 中文接口\n')
+            store=Store(Path(tmp)/'data');dataset=store.submit(archive,'compact.zip');store.pool.shutdown(wait=True)
+            try:
+                with store.connect() as db:
+                    schema=db.execute("SELECT sql FROM sqlite_master WHERE name='log_fts_v2'").fetchone()[0]
+                    tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'log_fts_v2_%'")}
+                self.assertIn("content='logs'",schema)
+                self.assertIn("detail='none'",schema)
+                self.assertNotIn('log_fts_v2_content',tables)
+                for keyword in ('100%', 'x_y', '中文接口'):
+                    self.assertEqual(store.search({'dataset':dataset,'q':keyword})['summary']['total'],1)
+                self.assertEqual(store.datasets()[0]['index_version'],2)
+            finally:
+                store.pool.shutdown(wait=True)
+
+    def test_legacy_and_compact_fts_are_searched_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first=Store(tmp);first.pool.shutdown(wait=True)
+            with first.connect() as db:
+                db.execute("CREATE VIRTUAL TABLE log_fts USING fts5(raw, tokenize='trigram')")
+                db.execute("INSERT INTO datasets(id,name,state,created,parser_version,index_version) VALUES('legacy','old','ready','2026',2,1)")
+                cursor=db.execute("INSERT INTO files(dataset,node,pod,kind,filename) VALUES('legacy','n','p','root','root.log')")
+                row=db.execute("INSERT INTO logs(dataset,file_id,line,end_line,raw) VALUES('legacy',?,1,1,'legacy-only-marker')",(cursor.lastrowid,))
+                db.execute("INSERT INTO log_fts(rowid,raw) VALUES(?,?)",(row.lastrowid,'legacy-only-marker'))
+            reopened=Store(tmp)
+            try:
+                self.assertEqual(reopened.search({'dataset':'legacy','q':'legacy-only-marker'})['summary']['total'],1)
+                self.assertTrue(any('旧版全文索引' in w for w in reopened.datasets()[0]['warnings']))
+                archive=Path(tmp)/'new.zip'
+                with zipfile.ZipFile(archive,'w') as outer:
+                    outer.writestr('ns_pod/svc/pod-svc/log/root.log',
+                                   '[2026-09-08 09:00:00.000 +0800] [2] [2] [INFO] [worker] compact-only-marker\n')
+                current=reopened.submit(archive,'new.zip');reopened.pool.shutdown(wait=True)
+                self.assertEqual(reopened.search({'dataset':current,'q':'compact-only-marker'})['summary']['total'],1)
+            finally:
+                reopened.pool.shutdown(wait=True)
+
 
 if __name__ == '__main__':
     unittest.main()

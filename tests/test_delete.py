@@ -58,7 +58,7 @@ class DeleteDatasetTests(unittest.TestCase):
                 self.assertEqual(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (first,)).fetchone()[0], 0)
                 self.assertEqual(db.execute('SELECT count(*) FROM files WHERE dataset=?', (first,)).fetchone()[0], 0)
                 self.assertGreater(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (second,)).fetchone()[0], 0)
-                if server.store.fts:
-                    self.assertEqual(db.execute('SELECT count(*) FROM log_fts WHERE rowid NOT IN (SELECT id FROM logs)').fetchone()[0], 0)
+                for table in server.store.fts_tables:
+                    self.assertEqual(db.execute(f'SELECT count(*) FROM {table} WHERE rowid NOT IN (SELECT id FROM logs)').fetchone()[0], 0)
             server.shutdown();server.server_close();thread.join()
             server.store.pool.shutdown(wait=True)

@@ -110,7 +110,8 @@ async function refreshDatasets(selectId) {
     status.hidden=false;status.textContent=`正在删除 ${deleting.name} 并释放磁盘空间…`;
   } else if (pending) {
     status.hidden = false;
-    status.textContent = `正在解析 ${pending.name} … 已读取 ${number(pending.progress?.files)} 个文件、${number(pending.progress?.records)} 条记录。完成后将自动切换。`;
+    const p=pending.progress||{};
+    status.textContent = `正在解析 ${pending.name} … 已读取 ${number(p.files)} 个文件、${number(p.records)} 条记录、${formatBytes(p.bytes)}；当前约 ${number(p.records_per_second)} 条/秒。完成后将自动切换。`;
   } else if (failed && datasets[0]?.id === failed.id && !selectId) {
     status.hidden = false; status.classList.add('failed'); status.textContent = `导入失败：${failed.name} — ${failed.error}。已有日志包仍可使用。`;
   } else if (current?.warnings.length) {

@@ -123,7 +123,8 @@ class FailureTests(unittest.TestCase):
             self.assertTrue(dataset['error'])
             with store.connect() as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM logs').fetchone()[0],0)
-                if store.fts:self.assertEqual(db.execute('SELECT count(*) FROM log_fts').fetchone()[0],0)
+                for table in store.fts_tables:
+                    self.assertEqual(db.execute(f'SELECT count(*) FROM {table}').fetchone()[0],0)
             with self.assertRaises(ValueError):store.search({'dataset':identifier})
 
     def test_gbk_decoding_and_archive_paths_not_extracted(self):
