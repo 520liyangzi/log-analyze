@@ -1,7 +1,7 @@
 'use strict';
 // xterm renders the real PTY. No timed prompt injection or readiness guessing.
 (() => {
-  let term, fit, sessionId='', cursor=0, timer, running=false, pollGeneration=0;
+  let term, fit, sessionId='', cursor=0, timer, running=false, pollGeneration=0, historyVisible=false;
   let inputQueue='', sending=false, resizeTimer, reportText='', currentInfo=null, available=false;
   let rules=null, editorBase=0, editorDirty=false, previewText='', previewAction=null, projectSnapshot=null, initialProjectSnapshot=null, lastReportAt=0, starting=false;
   const request=api;
@@ -69,7 +69,8 @@
   async function connect(info) {
     if(sending)throw new Error('输入正在发送，请稍后切换终端');
     clearTimeout(timer);const generation=++pollGeneration;
-    sessionId=info.id;cursor=0;inputQueue='';currentInfo=info;
+    sessionId=info.id;cursor=0;inputQueue='';currentInfo=info;historyVisible=false;
+    $('#viewTerminalHistory').textContent='查看终端记录';
     sessionStorage.setItem('logscopeTerminal',sessionId);
     reportText='';lastReportAt=0;$('#terminalReport').textContent='正在检查本次报告…';
     initialize();term.reset();setStatus(info);await sessions();fit.fit();term.focus();
@@ -95,15 +96,21 @@
     };
     poll();
   }
-  async function openHistory(info){
-    if(sending)throw new Error('输入正在发送，请稍后切换窗口');
-    clearTimeout(timer);++pollGeneration;sessionId=info.id;cursor=0;inputQueue='';currentInfo=info;running=false;
-    sessionStorage.setItem('logscopeTerminal',sessionId);initialize();term.reset();
-    setStatus(info);
+  function renderHistoryOverview(){
+    historyVisible=false;initialize();term.reset();
+    $('#viewTerminalHistory').textContent='查看终端记录';
     term.writeln('\x1b[38;5;111mLogScope · 已选择历史排查任务\x1b[0m');
     term.writeln('尚未恢复 AI 对话，也没有自动载入之前的 CMD 输出。');
     term.writeln('需要回看时点击「查看终端记录」；需要继续对话时点击「恢复这个对话」。');
-    await sessions();await loadReport(true);fit.fit();
+    fit.fit();
+  }
+  async function openHistory(info){
+    if(sending)throw new Error('输入正在发送，请稍后切换窗口');
+    clearTimeout(timer);++pollGeneration;sessionId=info.id;cursor=0;inputQueue='';currentInfo=info;running=false;
+    sessionStorage.setItem('logscopeTerminal',sessionId);
+    setStatus(info);
+    renderHistoryOverview();
+    await sessions();await loadReport(true);
     notice(info.ai_session_id?'历史任务已选中，尚未恢复或载入旧终端输出。':'历史任务已选中；如需恢复，请先保存 AI Session ID。');
   }
   function renderTaskTabs(items){
@@ -322,6 +329,11 @@
   });
   $('#viewTerminalHistory').addEventListener('click',async()=>{
     if(!sessionId||running)return;
+    if(historyVisible){
+      renderHistoryOverview();
+      notice('已隐藏旧终端记录；当前仍是历史任务概览，没有恢复 AI 对话。');
+      return;
+    }
     const target=sessionId;$('#viewTerminalHistory').disabled=true;
     try{
       const result=await request('/api/terminal/history?id='+target);if(target!==sessionId)return;
@@ -329,6 +341,7 @@
       if(result.truncated)term.writeln('\x1b[38;5;214m[较早的终端记录已省略，当前显示最后 2 MB]\x1b[0m');
       if(result.transcript)await new Promise(resolve=>term.write(result.transcript,resolve));
       else term.writeln('\x1b[38;5;111m[这个任务还没有保存终端输出]\x1b[0m');
+      historyVisible=true;$('#viewTerminalHistory').textContent='隐藏终端记录';
       fit.fit();notice('已载入保存的终端记录；这只是回放，没有恢复 AI 对话。');
     }catch(e){notice(e.message);toast(e.message);}
     finally{$('#viewTerminalHistory').disabled=running;}
@@ -349,8 +362,9 @@
     const target=sessionId;$('#deleteTerminalSession').disabled=true;
     try{
       await request('/api/terminal/delete',{id:target});
-      clearTimeout(timer);++pollGeneration;sessionId='';cursor=0;currentInfo=null;running=false;reportText='';
+      clearTimeout(timer);++pollGeneration;sessionId='';cursor=0;currentInfo=null;running=false;historyVisible=false;reportText='';
       sessionStorage.removeItem('logscopeTerminal');initialize();term.reset();
+      $('#viewTerminalHistory').textContent='查看终端记录';
       term.writeln('\x1b[38;5;111mLogScope · AI 排查终端\x1b[0m');term.writeln('排查会话已删除，可以开始新的任务。');
       $('#analysisSessionBar').hidden=true;$('#sessionIdentity').hidden=true;$('#terminalWorkspace').classList.remove('connected');
       $('#terminalState').textContent='尚未启动';$('#terminalCwd').textContent='终端尚未启动。任务、终端记录和报告会自动保存在本机。';
@@ -385,7 +399,7 @@
     if(e.detail!=='terminal')return;
     try{
       initialize();fit.fit();datasetLabel();await refreshRules();
-      if(!loaded){await configuration();const items=await sessions();const previous=items.find(s=>s.id===sessionStorage.getItem('logscopeTerminal'));if(previous)await connect(previous);loaded=true;}
+      if(!loaded){await configuration();const items=await sessions();const previous=items.find(s=>s.id===sessionStorage.getItem('logscopeTerminal'));if(previous){if(previous.live&&previous.state==='running')await connect(previous);else await openHistory(previous);}loaded=true;}
     }catch(error){notice(error.message);}
   });
 })();
