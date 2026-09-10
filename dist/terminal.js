@@ -3,11 +3,12 @@
 (() => {
   let term, fit, sessionId='', cursor=0, timer, running=false, pollGeneration=0;
   let inputQueue='', sending=false, resizeTimer, reportText='', currentInfo=null, available=false;
-  let rules=null, editorBase=0, editorDirty=false, previewText='', previewAction=null, projectSnapshot=null, lastReportAt=0, starting=false;
+  let rules=null, editorBase=0, editorDirty=false, previewText='', previewAction=null, projectSnapshot=null, initialProjectSnapshot=null, lastReportAt=0, starting=false;
   const request=api;
   const draftKey='logscopeAnalysisQuestion';
   $('#terminalQuestion').value=localStorage.getItem(draftKey)||'';
   $('#projectPath').value=localStorage.getItem('logscopeProjectPath')||'';
+  $('#initialProjectPath').value=localStorage.getItem('logscopeProjectPath')||'';
   $('#terminalQuestion').addEventListener('input',()=>localStorage.setItem(draftKey,$('#terminalQuestion').value));
   function notice(text){$('#terminalNotice').textContent=text;}
   function datasetLabel(){
@@ -47,7 +48,8 @@
       ? `已保存 Session ID；${running?'当前对话仍在运行':'可按启动设置中的模板恢复对话'}。`
       : '若终端输出包含 Session ID 会自动识别，也可手动粘贴。';
     const updates=currentInfo.rule_updates||[];
-    $('#sessionTaskSummary').textContent=`本次会话：${currentInfo.name||currentInfo.dataset||''} · 初始规则 v${currentInfo.rules_version||'?'}${updates.length?' · 已准备更新 v'+updates[updates.length-1].version:''} · ${currentInfo.question||'未填写问题'}`;
+    const project=currentInfo.project?` · 代码 ${currentInfo.project.branch} @ ${currentInfo.project.commit.slice(0,12)}`:'';
+    $('#sessionTaskSummary').textContent=`本次会话：${currentInfo.name||currentInfo.dataset||''} · 初始规则 v${currentInfo.rules_version||'?'}${updates.length?' · 已准备更新 v'+updates[updates.length-1].version:''}${project} · ${currentInfo.question||'未填写问题'}`;
     if(info.error)notice(info.error);
   }
   async function queueInput(data) {
@@ -132,7 +134,15 @@
     $('#activeRulesBadge').textContent='分析规则 v'+rules.version;return rules;
   }
   function taskBody(){
-    return {dataset:state.dataset,question:$('#terminalQuestion').value.trim(),rules_version:rules?.version};
+    const body={dataset:state.dataset,question:$('#terminalQuestion').value.trim(),rules_version:rules?.version};
+    const path=$('#initialProjectPath').value.trim();
+    if(path){
+      if(!initialProjectSnapshot)throw new Error('项目目录已经填写，请先点击“读取项目与分支”');
+      const branch=$('#initialProjectBranch').value;
+      if(!branch)throw new Error('请选择代码分支');
+      Object.assign(body,{project_path:initialProjectSnapshot.root,project_branch:branch});
+    }
+    return body;
   }
   async function start(runCommand,preparedBody=null) {
     if(!needDataset()||starting)return;
@@ -190,7 +200,9 @@
     starting=true;$('#terminalStart').disabled=true;
     try{
       await refreshRules();const body=taskBody();const result=await request('/api/terminal/preview',body);
-      showPreview(result.text,'启动前预览 task.md','日志范围、查询线索、分析规则和可用命令都会原样写入任务文件。确认前不会启动 AI。',{kind:'start',body});
+      const prepared={...body,project_commit:result.task.project?.commit};
+      const projectNote=result.task.project?`；代码固定到 ${result.task.project.branch} @ ${result.task.project.commit.slice(0,12)}`:'';
+      showPreview(result.text,'启动前预览 task.md','日志范围、查询线索、分析规则和可用命令都会原样写入任务文件'+projectNote+'。确认前不会启动 AI。',{kind:'start',body:prepared});
     }catch(e){toast(e.message);}
     finally{starting=false;$('#terminalStart').disabled=!available;}
   }
@@ -199,6 +211,23 @@
   $('#saveTerminalSettings').addEventListener('click',async()=>{try{await saveSettings();toast('启动设置已保存');}catch(e){toast(e.message);}});
   $('#terminalCommand').addEventListener('input',launchLabel);$('#terminalLaunchMode').addEventListener('change',launchLabel);
   $('#dataset').addEventListener('change',datasetLabel);
+  async function loadInitialProjectBranches(){
+    const path=$('#initialProjectPath').value.trim();if(!path){toast('请填写项目的绝对路径');$('#initialProjectPath').focus();return;}
+    $('#initialProjectBranch').disabled=true;$('#initialProjectStatus').textContent='正在读取 Git 项目与分支…';
+    try{
+      initialProjectSnapshot=await request('/api/project/branches?'+paramsURL({path}));
+      localStorage.setItem('logscopeProjectPath',initialProjectSnapshot.root);$('#initialProjectPath').value=initialProjectSnapshot.root;
+      $('#initialProjectBranch').innerHTML=initialProjectSnapshot.branches.map(branch=>`<option value="${escapeHTML(branch)}">${escapeHTML(branch)}${branch===initialProjectSnapshot.current?' · 当前分支':''}</option>`).join('');
+      const remembered=localStorage.getItem('logscopeProjectBranch');
+      if(remembered&&initialProjectSnapshot.branches.includes(remembered))$('#initialProjectBranch').value=remembered;
+      $('#initialProjectBranch').disabled=false;
+      $('#initialProjectStatus').textContent=`已读取 ${initialProjectSnapshot.branches.length} 个分支；启动预览会固定 commit，AI 只读查询。`;
+    }catch(e){initialProjectSnapshot=null;$('#initialProjectStatus').textContent=e.message;toast(e.message);}
+  }
+  $('#initialProjectPath').addEventListener('input',()=>{initialProjectSnapshot=null;$('#initialProjectBranch').disabled=true;localStorage.setItem('logscopeProjectPath',$('#initialProjectPath').value);$('#initialProjectStatus').textContent='目录有变化，请重新读取项目与分支。';});
+  $('#initialProjectBranch').addEventListener('change',()=>localStorage.setItem('logscopeProjectBranch',$('#initialProjectBranch').value));
+  $('#loadInitialProjectBranches').addEventListener('click',loadInitialProjectBranches);
+  $('#clearInitialProject').addEventListener('click',()=>{initialProjectSnapshot=null;$('#initialProjectPath').value='';$('#initialProjectBranch').disabled=true;$('#initialProjectBranch').innerHTML='<option value="">先读取项目分支</option>';localStorage.removeItem('logscopeProjectPath');localStorage.removeItem('logscopeProjectBranch');$('#initialProjectStatus').textContent='本次任务只分析日志，不读取项目代码。';});
   $$('[data-question]').forEach(button=>button.addEventListener('click',()=>{
     $('#terminalQuestion').value=button.dataset.question;localStorage.setItem(draftKey,button.dataset.question);$('#terminalQuestion').focus();
   }));

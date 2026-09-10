@@ -19,7 +19,7 @@
   <div id="datasetInfo" class="dataset-info">上传外层 ZIP，自动检索所有节点。</div>
   <button id="sideUpload" class="outline wide">＋ 导入日志包</button>
   <button id="deleteDataset" class="danger-outline wide" disabled>删除当前日志包</button>
-  <div class="side-bottom"><div class="local-badge"><span></span> 本机存储 · 离线搜索</div><p>搜索在本机运行。AI 问诊或 Agent 分析时，会使用你配置的模型服务。</p><div class="version">LOGSCOPE <span>v1.7</span></div></div>
+  <div class="side-bottom"><div class="local-badge"><span></span> 本机存储 · 离线搜索</div><p>搜索在本机运行。AI 问诊或 Agent 分析时，会使用你配置的模型服务。</p><div class="version">LOGSCOPE <span>v1.8</span></div></div>
 </aside>
 <main>
   <header class="topbar"><div><span class="breadcrumb">工作空间</span><span class="slash">/</span><span id="viewLabel">全局搜索</span></div><button id="settings" class="quiet">⚙ API 模型配置</button></header>
@@ -45,8 +45,9 @@
         <div class="analysis-question"><label for="terminalQuestion">这次想查什么？</label><textarea id="terminalQuestion" rows="3" maxlength="20000" placeholder="例如：/api/model/map 今天上午响应很慢，帮我找出对应请求和相关异常。"></textarea>
           <div class="question-examples"><span>试试这样问</span><button type="button" data-question="帮我检查这个日志包里的异常接口和慢请求，先概括情况，再定位最值得关注的问题。">异常与慢请求</button><button type="button" data-question="请追踪流水号【填写流水号】的完整过程，列出各 Pod 的关键日志和异常。">追踪流水号</button><button type="button" data-question="请检查接口【填写接口路径】为什么报错，HTTP 200 也要核对业务是否成功。">接口报错</button></div>
         </div>
+        <div class="initial-project-context"><div class="initial-project-heading"><div><strong>项目代码（可选）</strong><span>一起交给 AI，由它根据日志线索决定是否查代码</span></div><button class="text-button" id="clearInitialProject" type="button">不使用代码</button></div><div class="code-project-grid"><label>本机 Git 项目目录<input id="initialProjectPath" placeholder="例如 D:/workspace/your-project" autocomplete="off"></label><label>代码分支<select id="initialProjectBranch" disabled><option value="">先读取项目分支</option></select></label></div><div class="terminal-launch initial-project-actions"><button class="quiet" id="loadInitialProjectBranches" type="button">读取项目与分支</button><span class="subtle" id="initialProjectStatus">不填写时只分析日志；选择后固定到预览时的 commit，只读代码。</span></div></div>
         <div class="terminal-launch"><button class="primary" id="terminalStart">✧ 生成任务并预览</button><button class="quiet" id="previewTask">仅预览 task.md</button><button class="text-button" id="editRules">编辑分析规则</button><span class="subtle" id="launchSummary">确认后启动 Claude，自动读取任务</span></div>
-        <div class="analysis-flow"><span><b>1</b> 预览 task.md</span><i>→</i><span><b>2</b> AI 查询已有索引</span><i>→</i><span><b>3</b> 生成日志报告</span><i>→</i><span><b>4</b> 可选：结合代码继续定位</span></div>
+        <div class="analysis-flow"><span><b>1</b> 预览日志与代码范围</span><i>→</i><span><b>2</b> AI 查询已有索引</span><i>→</i><span><b>3</b> 按日志线索查看代码</span><i>→</i><span><b>4</b> 输出定位报告</span></div>
         <p class="analysis-speed-note">日志搜索走导入时建立的 SQLite / FTS 索引，通常是毫秒级；等待时间主要来自本机 AI 启动、模型思考、多轮证据核验和生成报告。任务里已附带日志范围与查询线索，减少无意义的重复查询。</p>
         <details class="agent-settings" id="agentSettings"><summary>启动设置 <span>首次配置公司命令，之后自动记住</span></summary><div class="terminal-setup-grid"><label>本机 AI 启动命令<input id="terminalCommand" value="claude" maxlength="2000" placeholder="claude 或公司内部命令"></label><label>任务传入方式<select id="terminalLaunchMode"><option value="argument">自动传入任务（推荐，兼容 Claude）</option><option value="manual">兼容模式：AI 就绪后手动发送</option></select></label><label>恢复命令模板<input id="resumeCommandTemplate" value="{command} --sessions {session_id}" maxlength="2000" spellcheck="false"></label></div><div class="terminal-launch"><button class="quiet" id="saveTerminalSettings">保存设置</button><button class="text-button" id="shellStart">只打开 CMD / Shell</button><span id="terminalCapability" class="subtle"></span></div><p class="form-note">公司工具默认按 <code>{command} --sessions {session_id}</code> 恢复。标准 Claude 可改成 <code>{command} --resume {session_id}</code>。Session ID 只保存在本机任务目录。</p></details>
       </div>

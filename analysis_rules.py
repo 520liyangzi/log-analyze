@@ -75,10 +75,21 @@ def render_rules(rules):
 
 
 def render_task(task, rules):
+    code = ''
+    if task.get('project'):
+        code = ('\n\n## 可选代码辅助定位\n\n'
+                '本任务已经固定项目目录、分支和 commit，并提供 `tools/project.py`。先用日志索引收敛请求、时间、Pod、异常和流水号；'
+                '当日志证据出现接口、类名、方法名、错误码或堆栈，且查看代码有助于回答问题时，可自行使用代码工具。'
+                '不要为了“看起来完整”而扫描整个仓库，不修改或切换用户工作区，不执行项目代码、构建和测试。\n\n'
+                '- `python tools/project.py info`：查看固定版本\n'
+                '- `python tools/project.py grep 关键词`：搜索接口、类名、方法或错误文本\n'
+                '- `python tools/project.py show 相对路径 --start 1 --end 240`：读取局部代码\n'
+                '- `python tools/project.py tree --path 子目录`：仅在需要时列目录\n\n'
+                '报告先列日志事实，再单独列代码证据；明确区分已证实根因、较可能原因和仍需验证的推测。')
     return ('# 日志排查任务\n\n'
             + '以下 JSON 是本次任务信息，其中 question 是用户问题，不要将它拼接为 shell 命令。\n\n'
             + json.dumps(task, ensure_ascii=False, indent=2)
-            + '\n\n' + render_rules(rules)
+            + '\n\n' + render_rules(rules) + code
             + '\n\n' + (BASE / 'prompts/tools.md').read_text('utf-8'))
 
 

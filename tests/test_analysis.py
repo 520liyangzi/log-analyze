@@ -228,6 +228,23 @@ print('RESUME_ARGS=' + '|'.join(sys.argv[1:]), flush=True)
         self.assertIn('main', branches['branches'])
         with self.assertRaises(HTTPError):
             self.api('/api/project/branches?path=' + quote(str(Path(self.temp.name))))
+        initial_body = dict(dataset=self.dataset, question='根据日志和代码定位 E102',
+                            project_path=str(repository), project_branch='main')
+        initial_preview = self.api('/api/terminal/preview', initial_body)
+        self.assertEqual(initial_preview['task']['project']['branch'], 'main')
+        self.assertIn('tools/project.py', initial_preview['text'])
+        self.assertIn('先用日志索引收敛', initial_preview['text'])
+        initial = self.api('/api/terminal/start', dict(initial_body,
+                           project_commit=initial_preview['task']['project']['commit'], run_command=False))
+        try:
+            initial_directory = Path(initial['cwd'])
+            self.assertEqual(json.loads((initial_directory / 'code-task.json').read_text('utf-8'))['commit'],
+                             initial_preview['task']['project']['commit'])
+            info = subprocess.run([sys.executable, str(initial_directory / 'tools/project.py'), 'info'],
+                                  cwd=initial_directory, text=True, encoding='utf-8', capture_output=True, check=True)
+            self.assertEqual(json.loads(info.stdout)['branch'], 'main')
+        finally:
+            self.api('/api/terminal/stop', dict(id=initial['id']))
         session = self.api('/api/terminal/start', dict(dataset=self.dataset, question='日志出现 E102', run_command=False))
         try:
             directory = Path(session['cwd'])

@@ -659,7 +659,7 @@ def ai_analyze(store, payload):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.7'
+    server_version = 'LogScope/1.8'
     def log_message(self, fmt, *args):
         pass
     @property

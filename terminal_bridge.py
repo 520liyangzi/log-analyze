@@ -204,6 +204,7 @@ class Session:
             error=self.error, created=self.created, cwd=str(self.directory),
             name=self.task.get('name', ''), question=self.task.get('question', ''),
             rules_version=self.task.get('rules_version'), launch_mode=self.launch_mode,
+            project=self.task.get('project'),
             ai_session_id=self.ai_session_id, rule_updates=list(self.rule_updates),
             code_tasks=list(self.code_tasks), updated=dt.datetime.now(dt.timezone.utc).isoformat()))
 
@@ -212,6 +213,7 @@ class Session:
                     created=self.created, cwd=str(self.directory), pid=self.pty.pid,
                     name=self.task.get('name', ''), question=self.task.get('question', ''),
                     rules_version=self.task.get('rules_version'), launch_mode=self.launch_mode,
+                    project=self.task.get('project'),
                     rule_updates=list(self.rule_updates), code_tasks=list(self.code_tasks),
                     ai_session_id=self.ai_session_id, live=True, saved=True,
                     transcript_bytes=self.transcript_path.stat().st_size if self.transcript_path.exists() else 0)
@@ -310,6 +312,17 @@ class TerminalManager:
         task = dict(dataset=dataset, name=name, url=self.url, question=question, python=sys.executable,
                     rules_version=rules['version'], scope=self.store.dataset_scope(dataset),
                     query_hints={'endpoints': endpoints[:20], 'trace_ids': trace_ids[:20]})
+        project_path = str(body.get('project_path', '')).strip()
+        project_branch = str(body.get('project_branch', '')).strip()
+        if project_path or project_branch:
+            if not project_path or not project_branch:
+                raise ValueError('项目目录和代码分支需要一起选择')
+            repository = select_revision(project_path, project_branch)
+            expected = str(body.get('project_commit', '')).strip()
+            if expected and expected != repository['commit']:
+                raise ValueError('所选分支在任务预览后发生了变化，请重新预览')
+            task['project'] = dict(project_root=repository['root'], branch=repository['branch'],
+                                   commit=repository['commit'], read_only=True)
         return task, rules, render_task(task, rules)
 
     def preview(self, body):
@@ -337,7 +350,9 @@ class TerminalManager:
             atomic_json(directory / 'rules.json', rules)
             (directory / 'task.json').write_text(json.dumps(task, ensure_ascii=False, indent=2), 'utf-8')
             (directory / 'task.md').write_text(task_text, 'utf-8')
-            (directory / 'CLAUDE.md').write_text('本目录用于 LogScope 日志排查。先读取 task.md，按其中的问题和规则调用 tools/logscope.py。\n', 'utf-8')
+            if task.get('project'):
+                atomic_json(directory / 'code-task.json', task['project'])
+            (directory / 'CLAUDE.md').write_text('本目录用于 LogScope 日志排查。先读取 task.md，按其中的问题和规则调用 tools/logscope.py；任务包含项目时可按需调用 tools/project.py。\n', 'utf-8')
             env = dict(os.environ, TERM='xterm-256color', COLORTERM='truecolor', PYTHONIOENCODING='utf-8',
                        LOGSCOPE_URL=self.url, LOGSCOPE_DATASET_ID=dataset)
             pty = WindowsPTY(directory, env, cols, rows) if os.name == 'nt' else UnixPTY(directory, env, cols, rows)
@@ -378,7 +393,7 @@ class TerminalManager:
             info = dict(id=identifier, dataset=task.get('dataset', ''), command='', state='saved',
                         error='', created=dt.datetime.fromtimestamp(directory.stat().st_mtime, dt.timezone.utc).isoformat(),
                         cwd=str(directory), name=task.get('name', ''), question=task.get('question', ''),
-                        rules_version=task.get('rules_version'), launch_mode='manual', ai_session_id='',
+                        rules_version=task.get('rules_version'), launch_mode='manual', project=task.get('project'), ai_session_id='',
                         rule_updates=[], code_tasks=[])
         info.update(id=identifier, cwd=str(directory), live=False, saved=True,
                     transcript_bytes=(directory / 'terminal.log').stat().st_size if (directory / 'terminal.log').exists() else 0,
