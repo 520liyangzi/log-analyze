@@ -16,6 +16,7 @@ import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
+from log_collector import LogCollector
 from terminal_bridge import TerminalManager, dimensions
 
 BASE = Path(__file__).resolve().parent
@@ -592,7 +593,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.12'
+    server_version = 'LogScope/1.13'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -627,6 +628,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == '/api/datasets':
                 self.json(self.store.datasets())
+            elif parsed.path == '/api/collector/capability':
+                self.json(self.server.collector.capability())
+            elif parsed.path == '/api/collector/status':
+                self.json(self.server.collector.status(params.get('id', '')))
             elif parsed.path == '/api/files':
                 self.json(self.store.filters(params.get('dataset', '')))
             elif parsed.path == '/api/search':
@@ -727,6 +732,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(size) or b'{}')
                 if parsed.path == '/api/terminal/config':
                     self.json(self.server.terminals.save_config(body))
+                elif parsed.path == '/api/collector/start':
+                    self.json(self.server.collector.start(body), 202)
                 elif parsed.path == '/api/analysis/rules':
                     self.json(self.server.terminals.rules.save(body))
                 elif parsed.path == '/api/terminal/preview':
@@ -776,17 +783,20 @@ class Handler(BaseHTTPRequestHandler):
 
 class LocalServer(ThreadingHTTPServer):
     def server_close(self):
+        if hasattr(self, 'collector'):
+            self.collector.close()
         if hasattr(self, 'terminals'):
             self.terminals.close()
         super().server_close()
 
 
-def make_server(directory, port=8765):
+def make_server(directory, port=8765, collect_script=None):
     server = LocalServer(('127.0.0.1', port), Handler)
     server.store = Store(directory)
     port = server.server_address[1]
     server.allowed_hosts = {f'127.0.0.1:{port}', f'localhost:{port}'}
     server.terminals = TerminalManager(server.store, f'http://127.0.0.1:{port}')
+    server.collector = LogCollector(server.store, collect_script or BASE / 'collect_logs.py')
     return server
 
 

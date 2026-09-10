@@ -4,9 +4,10 @@ const $$ = (s) => [...document.querySelectorAll(s)];
 const escapeHTML = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const number = (n) => Number(n || 0).toLocaleString('zh-CN');
 const UI_STATE_KEY = 'logscope.ui.v1';
+const COLLECT_JOB_KEY = 'logscope.collector.job';
 let savedUI={};
 try { savedUI=JSON.parse(localStorage.getItem(UI_STATE_KEY)||'{}'); } catch {}
-const state = { dataset: savedUI.dataset || '', datasets: [], files: [], view: 'search', page: 1, tracePage: 1, lastSearch: null, lastTrace: null, rows: new Map(), searchSerial: 0, traceSerial: 0, refreshSerial: 0, correlation: null };
+const state = { dataset: savedUI.dataset || '', datasets: [], files: [], view: 'search', page: 1, tracePage: 1, lastSearch: null, lastTrace: null, rows: new Map(), searchSerial: 0, traceSerial: 0, refreshSerial: 0, correlation: null, collectionSerial: 0 };
 let toastTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 4500); }
 async function api(path, body) {
@@ -28,7 +29,11 @@ function formState(form) {
 }
 function saveUI() {
   const value={dataset:state.dataset,view:state.view,search:formState($('#searchForm')),
-    advanced:$('#advanced').open,trace:$('#traceId').value,fileSearch:$('#fileSearch').value};
+    advanced:$('#advanced').open,trace:$('#traceId').value,fileSearch:$('#fileSearch').value,
+    collector:{pod:$('#collectPod').value,start:$('#collectStart').value,end:$('#collectEnd').value,
+      url:$('#collectUrl').value,user:$('#collectUser').value,headless:$('#collectHeadless').value,
+      timeout:$('#collectTimeout').value,poll:$('#collectPoll').value,encoding:$('#collectEncoding').value,
+      offset:$('#collectOffset').value,unit:$('#collectUnit').value}};
   try { localStorage.setItem(UI_STATE_KEY,JSON.stringify(value)); } catch {}
 }
 function restoreSearchForm(values={}) {
@@ -233,6 +238,49 @@ async function openContext(row) {
   } catch(error) { $('#contextBody').textContent=error.message; }
 }
 function openUpload() { $('#uploadDialog').showModal(); }
+async function openCollector() {
+  $('#collectDialog').showModal();
+  try{
+    const capability=await api('/api/collector/capability');
+    $('#collectorCapability').textContent=capability.available
+      ? `${capability.script} 已就绪；下载成功后自动导入并建立索引。`
+      : capability.reason;
+    $('#collectSubmit').disabled=!capability.available;
+  }catch(error){$('#collectorCapability').textContent=error.message;$('#collectSubmit').disabled=true;}
+}
+function renderCollection(job){
+  const status=$('#collectionStatus');status.hidden=false;status.classList.toggle('failed',job.state==='failed');
+  const label=job.state==='collecting'?'正在采集':job.state==='importing'?'正在导入':job.state==='ready'?'采集完成':'采集失败';
+  status.textContent=`${label} · ${job.pod} · ${job.start} 至 ${job.end} — ${job.message}`;
+}
+async function pollCollection(identifier){
+  const serial=++state.collectionSerial;
+  try{
+    const job=await api('/api/collector/status?id='+encodeURIComponent(identifier));
+    if(serial!==state.collectionSerial)return;
+    renderCollection(job);
+    if(job.state==='ready'){
+      localStorage.removeItem(COLLECT_JOB_KEY);await refreshDatasets(job.dataset_id);setView('search');toast('日志采集和导入完成');
+    }else if(job.state==='failed'){
+      localStorage.removeItem(COLLECT_JOB_KEY);toast(job.message);
+    }else setTimeout(()=>pollCollection(identifier),1200);
+  }catch(error){
+    if(serial!==state.collectionSerial)return;
+    localStorage.removeItem(COLLECT_JOB_KEY);$('#collectionStatus').hidden=true;toast(error.message);
+  }
+}
+async function startCollection(){
+  const button=$('#collectSubmit');button.disabled=true;button.classList.add('is-loading');button.textContent='正在启动…';
+  try{
+    const result=await api('/api/collector/start',{pod:$('#collectPod').value,start:$('#collectStart').value,end:$('#collectEnd').value,
+      url:$('#collectUrl').value,user:$('#collectUser').value,password:$('#collectPassword').value,headless:$('#collectHeadless').value,
+      timeout:$('#collectTimeout').value,poll:$('#collectPoll').value,encoding:$('#collectEncoding').value,
+      offset:$('#collectOffset').value,unit:$('#collectUnit').value});
+    $('#collectPassword').value='';saveUI();$('#collectDialog').close();renderCollection(result);
+    localStorage.setItem(COLLECT_JOB_KEY,result.id);toast('采集脚本已启动');pollCollection(result.id);
+  }catch(error){$('#collectorCapability').textContent=error.message;toast(error.message);}
+  finally{button.disabled=false;button.classList.remove('is-loading');button.textContent='开始采集 →';}
+}
 function openDeleteDataset() {
   const dataset=state.datasets.find(item=>item.id===state.dataset);
   if(!dataset)return toast('请先选择要删除的日志包');
@@ -271,6 +319,7 @@ $('#dropzone').addEventListener('dragover',e=>{e.preventDefault();$('#dropzone')
 $('#dropzone').addEventListener('dragleave',()=>$('#dropzone').classList.remove('dragging'));
 $('#dropzone').addEventListener('drop',e=>{e.preventDefault();$('#dropzone').classList.remove('dragging');chooseFile(e.dataTransfer.files[0]);$('#uploadFile').required=false;});
 $('#uploadForm').addEventListener('submit',e=>{e.preventDefault();upload(selectedFile);});
+$('#collectForm').addEventListener('submit',e=>{e.preventDefault();startCollection();});
 $('#searchForm').addEventListener('submit',e=>{e.preventDefault();runSearch();});
 $('#traceForm').addEventListener('submit',e=>{e.preventDefault();runTrace();});
 $('#dataset').addEventListener('change',async()=>{state.dataset=$('#dataset').value;state.files=[];saveUI();try{await refreshDatasets(state.dataset);}catch(error){toast(error.message);}});
@@ -287,6 +336,8 @@ $$('[data-paste-time]').forEach(button=>button.addEventListener('click',async()=
 }));
 $('#fileSearch').addEventListener('input',()=>{renderFiles();saveUI();});
 for(const id of ['sideUpload','topUpload'])$('#'+id).addEventListener('click',openUpload);
+for(const id of ['sideCollect','topCollect'])$('#'+id).addEventListener('click',openCollector);
+for(const id of ['collectPod','collectStart','collectEnd','collectUrl','collectUser','collectHeadless','collectTimeout','collectPoll','collectEncoding','collectOffset','collectUnit'])$('#'+id).addEventListener('input',saveUI);
 $('#deleteDataset').addEventListener('click',openDeleteDataset);
 $('#confirmDeleteDataset').addEventListener('click',async()=>{
   const id=$('#deleteDialog').dataset.id,button=$('#confirmDeleteDataset');button.disabled=true;
@@ -339,7 +390,10 @@ clearResults();
 refreshDatasets(state.dataset).then(datasets=>{
   restoreSearchForm(savedUI.search);$('#traceId').value=savedUI.trace||'';
   $('#fileSearch').value=savedUI.fileSearch||'';
+  const collector=savedUI.collector||{};
+  for(const [id,key] of [['collectPod','pod'],['collectStart','start'],['collectEnd','end'],['collectUrl','url'],['collectUser','user'],['collectHeadless','headless'],['collectTimeout','timeout'],['collectPoll','poll'],['collectEncoding','encoding'],['collectOffset','offset'],['collectUnit','unit']])if(collector[key]!==undefined)$('#'+id).value=collector[key];
   setTimeout(()=>setView(savedUI.view||'search'),0);
+  const collectionJob=localStorage.getItem(COLLECT_JOB_KEY);if(collectionJob)pollCollection(collectionJob);
   if(datasets?.some(d=>d.state==='importing')) {
     const poll=async()=>{try{const all=await refreshDatasets();if(all?.some(d=>d.state==='importing'))setTimeout(poll,1500);}catch(e){toast(e.message);}};
     setTimeout(poll,1500);

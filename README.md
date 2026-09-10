@@ -1,6 +1,6 @@
 # LogScope · 本地多节点日志分析
 
-上传一个外层 ZIP，搜索全部节点的 `.log` / `.log.gz`，通过接口、Pod、时间、线程和流水号定位请求。中文界面，日志与索引保存在本机。
+上传外层 ZIP，或者调用本机采集脚本直接下载，搜索全部节点的 `.log` / `.log.gz`，通过接口、Pod、时间、线程和流水号定位请求。中文界面，日志与索引保存在本机。
 
 **Python 3.10+ 即可运行搜索；Windows 网页交互终端需要安装 requirements.txt 中的 pywinpty。无需 Node.js、Java、Docker 或外部数据库。** 前端为原生 HTML/CSS/JavaScript，后端为 Python 标准库 + SQLite；搜索和索引可断网运行，本机 AI 使用它自己的网络与模型配置。
 
@@ -29,6 +29,16 @@ python3 app.py
 
 端口占用时：`python app.py --port 8877`，浏览器也改为 `http://127.0.0.1:8877`。
 
+## 在线采集日志
+
+把你已有的 `collect_logs.py` 放到 `app.py` 同级目录。该文件已加入 `.gitignore`，不会被误提交到仓库。启动 LogScope 后点击 **在线采集日志**，填写 Pod 关键字和时间范围：
+
+```powershell
+python collect_logs.py --pod xxxx --start "2026-09-10 14:00:00" --end "2026-09-10 16:30:00"
+```
+
+页面会为每次任务传入独立的 `--output` 临时目录。脚本成功后，LogScope 从目录中选择最新生成的 ZIP，校验格式并自动导入、建立索引，随后切换到该日志包。URL、用户名、无头模式、超时、轮询和日志解析参数可以在高级设置覆盖；留空使用脚本默认值。密码只用于本次子进程参数，不保存到浏览器历史或 LogScope 配置。
+
 ## AI 排查：填问题，开始分析
 
 页面内置真实交互终端：Windows 使用 CMD + ConPTY，Linux/macOS 使用 PTY Shell。支持输入、方向键、权限确认、后续追问和 Ctrl+C，全部在页面里完成。
@@ -55,7 +65,7 @@ python3 app.py
 
 Skill 仍可选安装，作为外部 AI 发现查询工具的入口；分析流程统一从页面维护。日志解析格式变化仍需修改解析器，不会因为更新提示词自动修正旧索引。
 
-升级到 v1.12：停止旧服务 → `git pull` → `python -m pip install -r requirements.txt` → `python app.py` → 刷新页面。**已有日志不必重新导入**；已导入的日志、本机 AI 配置和历史任务都会保留。
+升级到 v1.13：停止旧服务 → `git pull` → `python -m pip install -r requirements.txt` → `python app.py` → 刷新页面。**已有日志不必重新导入**；已导入的日志、本机 AI 配置和历史任务都会保留。
 
 详细操作与兼容说明见 [AI 排查使用指南](docs/AGENT.md)。
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -151,6 +152,7 @@ class FailureTests(unittest.TestCase):
                 with urlopen(base+'/') as response:
                     home=response.read().decode()
                     self.assertIn('LogScope',home)
+                    self.assertIn('在线采集日志',home)
                     self.assertNotIn('API 问诊',home)
                     self.assertIn("default-src 'self'",response.headers['Content-Security-Policy'])
                 with self.assertRaises(HTTPError) as error:
@@ -165,6 +167,49 @@ class FailureTests(unittest.TestCase):
             finally:
                 server.shutdown();server.server_close();thread.join()
                 server.store.pool.shutdown(wait=True)
+
+
+class CollectorTests(unittest.TestCase):
+    def test_collect_script_downloads_zip_and_imports_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);script=root/'collect_logs.py'
+            script.write_text("""import argparse, io, json, pathlib, zipfile
+p=argparse.ArgumentParser()
+for name in ('pod','start','end','output','url','user','password','headless','timeout','poll'): p.add_argument('--'+name)
+a=p.parse_args();out=pathlib.Path(a.output);out.mkdir(parents=True,exist_ok=True)
+(pathlib.Path(__file__).parent/'received.json').write_text(json.dumps(vars(a),ensure_ascii=False),'utf-8')
+inner=io.BytesIO()
+with zipfile.ZipFile(inner,'w') as z: z.writestr('ns_order-pod/order/order-pod-order/log/root.log','[2026-09-10 14:30:00.000 +0800] [1234567890123456789] [1234567890123456789] [ERROR] [worker-1] [Order.java] [com.example] [run] [42] COLLECTED_MARKER')
+with zipfile.ZipFile(out/'collected.zip','w') as z: z.writestr('node-a.zip',inner.getvalue())
+print('download complete password=' + str(a.password),flush=True)
+""",'utf-8')
+            server=make_server(root/'data',0,collect_script=script)
+            thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            base='http://127.0.0.1:'+str(server.server_address[1])
+            def api(path,body=None):
+                request=Request(base+path,data=json.dumps(body).encode() if body is not None else None,
+                                headers={'Content-Type':'application/json'})
+                with urlopen(request,timeout=20) as response:return json.load(response)
+            try:
+                self.assertTrue(api('/api/collector/capability')['available'])
+                job=api('/api/collector/start',dict(pod='order;touch hacked',start='2026-09-10 14:00:00',
+                                                     end='2026-09-10 16:30:00',password='test secret'))
+                deadline=time.monotonic()+15
+                while time.monotonic()<deadline:
+                    job=api('/api/collector/status?id='+job['id'])
+                    if job['state'] in ('ready','failed'):break
+                    time.sleep(.05)
+                self.assertEqual(job['state'],'ready',job['message'])
+                self.assertNotIn('test secret',job['output'])
+                self.assertIn('[REDACTED]',job['output'])
+                result=api('/api/search?dataset='+job['dataset_id']+'&q=COLLECTED_MARKER')
+                self.assertEqual(result['summary']['total'],1)
+                received=json.loads((root/'received.json').read_text('utf-8'))
+                self.assertEqual(received['pod'],'order;touch hacked')
+                self.assertEqual(received['start'],'2026-09-10 14:00:00')
+                self.assertFalse((root/'hacked').exists())
+            finally:
+                server.shutdown();server.server_close();thread.join();server.store.pool.shutdown(wait=True)
 
 
 if __name__=='__main__':unittest.main()
