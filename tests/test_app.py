@@ -1,18 +1,15 @@
 import gzip
-import io
 import json
-import os
 from pathlib import Path
 import sqlite3
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import zipfile
 
-from app import Store, parse_line, timestamp, make_server, ai_analyze
+from app import Store, parse_line, timestamp, make_server
 from demo import create_demo, TRACE, root_line
 
 
@@ -104,23 +101,6 @@ class LogTests(unittest.TestCase):
         finally:
             self.store.fts=original
 
-    def test_ai_uses_retrieved_evidence_with_mock_provider(self):
-        config=self.store.directory/'ai-config.json'
-        config.write_text(json.dumps({'base_url':'https://model.invalid/v1','model':'test-model'}))
-        captured={}
-        def fake_open(request, timeout):
-            captured['url']=request.full_url
-            captured['body']=json.loads(request.data)
-            return io.BytesIO(json.dumps({'choices':[{'message':{'content':'模拟分析：连接池获取连接超时'}}]}).encode())
-        with patch.dict(os.environ, {'LOG_AI_API_KEY':'unit-test-only'}), patch('app.urlopen',fake_open):
-            result=ai_analyze(self.store,{'dataset':self.identifier,'endpoint':'/api/model/map','question':'为什么报错'})
-        self.assertEqual(captured['url'],'https://model.invalid/v1/chat/completions')
-        evidence=json.loads(captured['body']['messages'][1]['content'])
-        self.assertEqual(evidence['matched'],160)
-        self.assertTrue(any('SQLTransientConnectionException' in row for row in evidence['evidence']))
-        self.assertGreater(result['evidence_count'],0)
-        self.assertIn('模拟分析',result['answer'])
-
     def test_exact_file_scope(self):
         file=self.store.filters(self.identifier)[0]
         result=self.search(file_id=file['id'])
@@ -169,7 +149,9 @@ class FailureTests(unittest.TestCase):
                 with urlopen(base+'/api/search?dataset='+identifier+'&q=gzip-history-hit') as response:
                     self.assertEqual(json.load(response)['summary']['total'],2)
                 with urlopen(base+'/') as response:
-                    self.assertIn('LogScope',response.read().decode())
+                    home=response.read().decode()
+                    self.assertIn('LogScope',home)
+                    self.assertNotIn('API 问诊',home)
                     self.assertIn("default-src 'self'",response.headers['Content-Security-Policy'])
                 with self.assertRaises(HTTPError) as error:
                     urlopen(Request(base+'/api/datasets',headers={'Origin':'https://evil.invalid'}))
@@ -179,7 +161,7 @@ class FailureTests(unittest.TestCase):
                 self.assertEqual(error.exception.code,403)
                 with self.assertRaises(HTTPError) as error:
                     urlopen(Request(base+'/api/ai/analyze',data=b'{}',headers={'Content-Type':'application/json'}))
-                self.assertEqual(error.exception.code,400)
+                self.assertEqual(error.exception.code,404)
             finally:
                 server.shutdown();server.server_close();thread.join()
                 server.store.pool.shutdown(wait=True)

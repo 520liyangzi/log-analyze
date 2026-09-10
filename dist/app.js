@@ -28,8 +28,7 @@ function formState(form) {
 }
 function saveUI() {
   const value={dataset:state.dataset,view:state.view,search:formState($('#searchForm')),
-    advanced:$('#advanced').open,trace:$('#traceId').value,aiEndpoint:$('#aiEndpoint').value,
-    aiQuestion:$('#aiQuestion').value,fileSearch:$('#fileSearch').value};
+    advanced:$('#advanced').open,trace:$('#traceId').value,fileSearch:$('#fileSearch').value};
   try { localStorage.setItem(UI_STATE_KEY,JSON.stringify(value)); } catch {}
 }
 function restoreSearchForm(values={}) {
@@ -61,8 +60,7 @@ const viewMeta = {
   search:['全局搜索','每一条日志，都有迹可循。','跨节点搜索，从接口请求一路定位到异常现场。'],
   trace:['流水号追踪','把一次请求，完整串起来。','跨 Pod 汇集同一流水号，按时间还原请求过程。'],
   files:['日志文件','每个节点，每份日志。','查看解析到的原始文件及其完整压缩包来源。'],
-  terminal:['AI 排查','说出问题，让 AI 接着查。','使用本机 Claude 或公司 AI，搜索日志、核对证据，在这里继续追问。'],
-  ai:['API 问诊','从日志线索，到问题原因。','基于实际检索证据分析；由你决定何时连接模型。']
+  terminal:['AI 排查','说出问题，让 AI 接着查。','使用本机 Claude 或公司 AI，搜索日志、核对证据，在这里继续追问。']
 };
 function setView(view) {
   if(!viewMeta[view])view='search';
@@ -234,9 +232,6 @@ async function openContext(row) {
     $('#contextBody').innerHTML=records.map(r=>`<div class="context-item ${r.id===row.id?'focus':''}"><small>L${r.line}–${r.end_line}${r.id===row.id?' · 当前命中':''}</small><pre class="log-content">${escapeHTML(r.raw)}</pre></div>`).join('');
   } catch(error) { $('#contextBody').textContent=error.message; }
 }
-async function openSettings() {
-  try { const config=await api('/api/ai/config'); $('#baseUrl').value=config.base_url; $('#modelName').value=config.model; $('#keyState').textContent=config.key_ready?'密钥状态：已从环境变量读取':'密钥状态：尚未设置'; $('#configDialog').showModal(); } catch(error) { toast(error.message); }
-}
 function openUpload() { $('#uploadDialog').showModal(); }
 function openDeleteDataset() {
   const dataset=state.datasets.find(item=>item.id===state.dataset);
@@ -278,21 +273,13 @@ $('#dropzone').addEventListener('drop',e=>{e.preventDefault();$('#dropzone').cla
 $('#uploadForm').addEventListener('submit',e=>{e.preventDefault();upload(selectedFile);});
 $('#searchForm').addEventListener('submit',e=>{e.preventDefault();runSearch();});
 $('#traceForm').addEventListener('submit',e=>{e.preventDefault();runTrace();});
-$('#configForm').addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/ai/config',{base_url:$('#baseUrl').value,model:$('#modelName').value});$('#configDialog').close();toast('模型配置已保存');}catch(error){toast(error.message);}});
-$('#aiForm').addEventListener('submit',async e=>{
-  e.preventDefault(); if(!needDataset())return;
-  $('#analyzeButton').disabled=true; $('#aiAnswer').textContent='正在检索接口与关联日志，并等待模型分析…';
-  try{const result=await api('/api/ai/analyze',{dataset:state.dataset,endpoint:$('#aiEndpoint').value,question:$('#aiQuestion').value,consent:$('#consent').checked});$('#aiAnswer').textContent=`本次证据 ${result.evidence_count} 条 · 接口关键词命中 ${result.matched} 条\n\n${result.answer}`;}
-  catch(error){$('#aiAnswer').textContent=error.message;}
-  finally{$('#analyzeButton').disabled=false;}
-});
 $('#dataset').addEventListener('change',async()=>{state.dataset=$('#dataset').value;state.files=[];saveUI();try{await refreshDatasets(state.dataset);}catch(error){toast(error.message);}});
 $('#refresh').addEventListener('click',()=>refreshDatasets().catch(e=>toast(e.message)));
 for(const id of ['node','pod','service','kind'])$('#'+id).addEventListener('change',updateFilters);
 $('#resetFilters').addEventListener('click',()=>{$('#searchForm').reset();state.correlation=null;$('#correlation').hidden=true;updateFilters();saveUI();});
 $('#searchForm').addEventListener('input',saveUI);$('#searchForm').addEventListener('change',saveUI);
 $('#advanced').addEventListener('toggle',saveUI);
-for(const id of ['traceId','aiEndpoint','aiQuestion'])$('#'+id).addEventListener('input',saveUI);
+$('#traceId').addEventListener('input',saveUI);
 $$('[data-paste-time]').forEach(button=>button.addEventListener('click',async()=>{
   const input=$('#'+button.dataset.pasteTime);
   try { input.value=(await navigator.clipboard.readText()).trim();input.focus();saveUI(); }
@@ -316,7 +303,6 @@ $('#confirmDeleteDataset').addEventListener('click',async()=>{
   }catch(error){toast(error.message);}
   finally{button.disabled=false;}
 });
-for(const id of ['settings','aiSettings'])$('#'+id).addEventListener('click',openSettings);
 $$('.nav').forEach(button=>button.addEventListener('click',()=>setView(button.dataset.view)));
 $$('.close').forEach(button=>button.addEventListener('click',()=>button.closest('dialog').close()));
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();setView('search');$('#query').focus();}});
@@ -352,7 +338,6 @@ document.addEventListener('click',async e=>{
 clearResults();
 refreshDatasets(state.dataset).then(datasets=>{
   restoreSearchForm(savedUI.search);$('#traceId').value=savedUI.trace||'';
-  $('#aiEndpoint').value=savedUI.aiEndpoint||'';$('#aiQuestion').value=savedUI.aiQuestion||'';
   $('#fileSearch').value=savedUI.fileSearch||'';
   setTimeout(()=>setView(savedUI.view||'search'),0);
   if(datasets?.some(d=>d.state==='importing')) {

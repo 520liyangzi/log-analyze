@@ -43,6 +43,7 @@
     $('#sessionIdentity').hidden=false;
     if(document.activeElement!==$('#aiSessionId'))$('#aiSessionId').value=currentInfo.ai_session_id||'';
     $('#resumeTerminal').disabled=running||!currentInfo.ai_session_id;
+    $('#viewTerminalHistory').disabled=running;
     $('#deleteTerminalSession').disabled=running;
     $('#sessionIdentityHint').textContent=currentInfo.ai_session_id
       ? `已保存 Session ID；${running?'当前对话仍在运行':'可按启动设置中的模板恢复对话'}。`
@@ -98,13 +99,12 @@
     if(sending)throw new Error('输入正在发送，请稍后切换窗口');
     clearTimeout(timer);++pollGeneration;sessionId=info.id;cursor=0;inputQueue='';currentInfo=info;running=false;
     sessionStorage.setItem('logscopeTerminal',sessionId);initialize();term.reset();
-    const result=await request('/api/terminal/history?id='+sessionId);
-    currentInfo=result.info;setStatus(result.info);
-    if(result.truncated)term.writeln('\x1b[38;5;214m[较早的终端记录已省略，当前显示最后 2 MB]\x1b[0m');
-    if(result.transcript)await new Promise(resolve=>term.write(result.transcript,resolve));
-    else term.writeln('\x1b[38;5;111m[这个任务还没有保存终端输出]\x1b[0m');
+    setStatus(info);
+    term.writeln('\x1b[38;5;111mLogScope · 已选择历史排查任务\x1b[0m');
+    term.writeln('尚未恢复 AI 对话，也没有自动载入之前的 CMD 输出。');
+    term.writeln('需要回看时点击「查看终端记录」；需要继续对话时点击「恢复这个对话」。');
     await sessions();await loadReport(true);fit.fit();
-    notice(result.info.ai_session_id?'历史任务已打开；点击「恢复这个对话」可继续排查。':'历史任务已打开。保存 AI Session ID 后可以恢复原对话。');
+    notice(info.ai_session_id?'历史任务已选中，尚未恢复或载入旧终端输出。':'历史任务已选中；如需恢复，请先保存 AI Session ID。');
   }
   function renderTaskTabs(items){
     $('#taskTabs').innerHTML=items.length?items.map(s=>`<button class="task-tab${s.id===sessionId?' active':''}" data-task-id="${s.id}" title="${escapeHTML(s.question||s.name||'排查任务')}"><i class="task-tab-state ${s.state}"></i><span class="task-tab-label">${escapeHTML(s.question||s.name||'排查任务')} · ${stateLabel(s.state)}</span></button>`).join(''):'<span class="subtle">启动任务后会显示在这里</span>';
@@ -319,6 +319,19 @@
   $('#saveAiSessionId').addEventListener('click',async()=>{
     if(!sessionId)return toast('请先选择一个排查任务');
     try{const info=await request('/api/terminal/session-id',{id:sessionId,ai_session_id:$('#aiSessionId').value});currentInfo=info;setStatus(info);await sessions();toast('Session ID 已保存');}catch(e){toast(e.message);}
+  });
+  $('#viewTerminalHistory').addEventListener('click',async()=>{
+    if(!sessionId||running)return;
+    const target=sessionId;$('#viewTerminalHistory').disabled=true;
+    try{
+      const result=await request('/api/terminal/history?id='+target);if(target!==sessionId)return;
+      term.reset();
+      if(result.truncated)term.writeln('\x1b[38;5;214m[较早的终端记录已省略，当前显示最后 2 MB]\x1b[0m');
+      if(result.transcript)await new Promise(resolve=>term.write(result.transcript,resolve));
+      else term.writeln('\x1b[38;5;111m[这个任务还没有保存终端输出]\x1b[0m');
+      fit.fit();notice('已载入保存的终端记录；这只是回放，没有恢复 AI 对话。');
+    }catch(e){notice(e.message);toast(e.message);}
+    finally{$('#viewTerminalHistory').disabled=running;}
   });
   $('#resumeTerminal').addEventListener('click',async()=>{
     if(!sessionId||running)return;
