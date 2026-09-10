@@ -213,6 +213,48 @@ print('RESUME_ARGS=' + '|'.join(sys.argv[1:]), flush=True)
                 self.api('/api/terminal/stop', dict(id=identifier))
             self.api('/api/terminal/config', old_config)
 
+    def test_graceful_stop_repeats_ctrl_c_and_captures_resume_id(self):
+        fake = Path(self.temp.name) / 'graceful stop agent.py'
+        session_uuid = '3ed80f77-a31d-4513-b470-045dcac8d4c6'
+        fake.write_text("""import signal, time
+interrupts = 0
+def interrupted(signum, frame):
+ global interrupts
+ interrupts += 1
+ print('CTRL_C_COUNT=' + str(interrupts), flush=True)
+ if interrupts >= 2:
+  print('Resume this session with:', flush=True)
+  print('claude --resume 3ed80f77-a31d-4513-b470-045dcac8d4c6', flush=True)
+signal.signal(signal.SIGINT, interrupted)
+print('SAFE_STOP_READY', flush=True)
+while True: time.sleep(.1)
+""", 'utf-8')
+        command = subprocess.list2cmdline([sys.executable, str(fake)]) if os.name == 'nt' else shlex.join([sys.executable, str(fake)])
+        info = self.api('/api/terminal/start', dict(dataset=self.dataset, question='安全结束测试', run_command=False))
+        identifier = info['id']
+        try:
+            self.api('/api/terminal/input', dict(id=identifier, data=command + '\r'))
+            _, cursor = self.output_until(identifier, 'SAFE_STOP_READY')
+            stopping = self.api('/api/terminal/stop', dict(id=identifier, mode='graceful'))
+            self.assertEqual(stopping['state'], 'stopping')
+            output, cursor = self.output_until(identifier, '--resume ' + session_uuid, cursor)
+            self.assertIn('CTRL_C_COUNT=2', output)
+            deadline = time.monotonic() + 5
+            final = None
+            while time.monotonic() < deadline:
+                final = self.api(f'/api/terminal/output?id={identifier}&cursor={cursor}')
+                cursor = final['cursor']
+                if final['state'] == 'stopped':
+                    break
+                time.sleep(.04)
+            self.assertEqual(final['state'], 'stopped')
+            self.assertEqual(final['ai_session_id'], session_uuid)
+            self.assertIn(session_uuid, json.loads((Path(info['cwd']) / 'session.json').read_text('utf-8'))['ai_session_id'])
+        finally:
+            active = self.server.terminals.sessions.get(identifier)
+            if active and active.state == 'running':
+                self.api('/api/terminal/stop', dict(id=identifier, mode='force'))
+
     def test_code_followup_preview_fixed_branch_and_read_only_query(self):
         repository = Path(self.temp.name) / 'business project'
         repository.mkdir()

@@ -49,11 +49,13 @@ python3 app.py
 
 **排查窗口**支持同时运行 3 个任务和不限数量的历史任务。任务状态、完整 `terminal.log`、`task.md`、报告和 AI Session ID 都保存在本机。选择已结束的历史窗口时不会自动显示以前的 CMD 输出；点击 **查看终端记录** 才会回放，按钮随后变为 **隐藏终端记录**，再次点击即可回到干净的任务概览。点击 **恢复这个对话** 才会调用 AI 的会话恢复；如果任务没有自动识别 Session ID，可以粘贴后直接点击恢复，不必先单独保存。公司工具的默认恢复模板是 `{command} --sessions {session_id}`；标准 Claude 可改成 `{command} --resume {session_id}`。
 
+点击 **结束终端** 时不会立即杀进程：LogScope 会连续发送最多 6 次 `Ctrl+C`，等待 Claude 或公司 AI 输出 `--resume <UUID>` / `--sessions <UUID>`，识别后自动保存 ID 并关闭。多次仍未识别也会自动停止，任务、终端记录和报告继续保留；只有点击 **删除会话** 才会清理这些内容。
+
 不再需要的历史任务可点击 **删除会话** 清理。运行中的会话必须先结束；确认删除后，该任务目录中的任务快照、Session ID、终端记录、代码定位文件和报告都会永久删除，但不会删除日志包或其他排查任务。
 
 Skill 仍可选安装，作为外部 AI 发现查询工具的入口；分析流程统一从页面维护。日志解析格式变化仍需修改解析器，不会因为更新提示词自动修正旧索引。
 
-升级到 v1.11：停止旧服务 → `git pull` → `python -m pip install -r requirements.txt` → `python app.py` → 刷新页面。**已有日志不必重新导入**；已导入的日志、本机 AI 配置和历史任务都会保留。
+升级到 v1.12：停止旧服务 → `git pull` → `python -m pip install -r requirements.txt` → `python app.py` → 刷新页面。**已有日志不必重新导入**；已导入的日志、本机 AI 配置和历史任务都会保留。
 
 详细操作与兼容说明见 [AI 排查使用指南](docs/AGENT.md)。
 

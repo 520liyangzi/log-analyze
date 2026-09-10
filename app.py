@@ -592,7 +592,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.11'
+    server_version = 'LogScope/1.12'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -757,8 +757,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.server.terminals.get(body['id']).pty.resize(cols, rows)
                     self.json({'ok': True})
                 elif parsed.path == '/api/terminal/stop':
-                    self.server.terminals.get(body['id']).stop()
-                    self.json({'ok': True})
+                    session = self.server.terminals.get(body['id'])
+                    if body.get('mode') == 'graceful':
+                        self.json(session.request_stop())
+                    else:
+                        session.stop()
+                        self.json(session.info())
                 elif parsed.path == '/api/terminal/delete':
                     self.json(self.server.terminals.delete(body))
                 else:

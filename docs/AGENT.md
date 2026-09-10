@@ -99,6 +99,8 @@ claude "Read task.md in the current directory. Use its rules and query tools to 
 
 如果工具语法不同，在启动设置修改恢复命令模板；标准 Claude 使用 `{command} --resume {session_id}`。LogScope 只能重新调用工具的会话恢复能力，原会话是否存在、能否恢复由本机 AI 决定。
 
+点击 **结束终端** 会进入安全结束流程：最多连续发送 6 次 `Ctrl+C`，每次留出时间读取终端输出；识别 `--resume UUID`、`--sessions UUID` 或 `Session ID: UUID` 后先持久化 ID，再关闭 PTY。全部尝试后仍无 ID 也会自动停止，避免一直卡住。停止不会删除任务目录，后续仍可查看 `task.md`、`terminal.log` 和 `report.md`。
+
 历史任务不再需要时可点击 **删除会话**。运行中的任务必须先结束；二次确认后会删除整个任务目录，包括任务快照、Session ID、终端记录和报告，且无法恢复。日志包和其他排查任务不受影响。
 
 终端具有本机当前用户的权限，提示词中的只读要求不是 OS 沙箱。HTTP 只监听 127.0.0.1，并检查 Host/Origin。页面回放最多读取最近约 2 MB，但 `terminal.log` 会保存终端返回的完整内容；输入若被程序回显也会落盘，因此不要在终端输入不应保存的明文秘密。AI 自己的聊天存储遵循其配置。

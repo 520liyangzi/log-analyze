@@ -19,7 +19,7 @@ from project_access import inspect_repository, select_revision
 BASE = Path(__file__).resolve().parent
 TASK_PROMPT = 'Read task.md in the current directory. Use its rules and query tools to investigate the question. Reply in Chinese and write report.md.'
 DEFAULT_RESUME_TEMPLATE = '{command} --sessions {session_id}'
-SESSION_ID_RE = re.compile(r'(?i)\bsessions?(?:\s*id)?\s*[:=]?\s*([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\b')
+SESSION_ID_RE = re.compile(r'(?i)(?:\bsessions?(?:\s*id)?|--sessions?|--resume)\s*[:=]?\s*([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\b')
 
 
 def dimensions(cols, rows):
@@ -140,6 +140,9 @@ class Session:
         self.task = task or {}
         self.launch_mode = launch_mode
         self.ai_session_id = ai_session_id
+        self.stop_requested = False
+        self.stop_thread = None
+        self.stop_notice = ''
         self.session_id_scan_tail = ''
         self.rule_updates = rule_updates or []
         self.code_tasks = code_tasks or []
@@ -194,6 +197,7 @@ class Session:
             with self.lock:
                 if self.state == 'running':
                     self.state = 'exited'
+                self.stop_requested = False
                 self.persist()
             self.pty.close()
             self.transcript.close()
@@ -209,7 +213,9 @@ class Session:
             code_tasks=list(self.code_tasks), updated=dt.datetime.now(dt.timezone.utc).isoformat()))
 
     def info(self):
-        return dict(id=self.id, dataset=self.dataset, command=self.command, state=self.state, error=self.error,
+        state = 'stopping' if self.state == 'running' and self.stop_requested else self.state
+        return dict(id=self.id, dataset=self.dataset, command=self.command, state=state, error=self.error,
+                    stop_notice=self.stop_notice,
                     created=self.created, cwd=str(self.directory), pid=self.pty.pid,
                     name=self.task.get('name', ''), question=self.task.get('question', ''),
                     rules_version=self.task.get('rules_version'), launch_mode=self.launch_mode,
@@ -250,8 +256,50 @@ class Session:
     def stop(self):
         with self.lock:
             self.state = 'stopped'
+            self.stop_requested = False
             self.persist()
         self.pty.close()
+
+    def request_stop(self):
+        with self.lock:
+            if self.state != 'running':
+                return self.info()
+            if self.stop_requested:
+                return self.info()
+            self.stop_requested = True
+            self.stop_notice = ''
+            self.stop_thread = threading.Thread(target=self._graceful_stop, daemon=True)
+            self.stop_thread.start()
+            return self.info()
+
+    def _graceful_stop(self):
+        # Claude-like tools normally print their resume command after Ctrl+C.
+        # Keep the PTY reader alive until the UUID has been captured and persisted.
+        for _ in range(6):
+            with self.lock:
+                if self.state != 'running':
+                    return
+            try:
+                with self.write_lock:
+                    self.pty.write('\x03')
+            except (OSError, EOFError):
+                return
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                with self.lock:
+                    if self.state != 'running':
+                        return
+                    captured = bool(self.ai_session_id)
+                if captured:
+                    time.sleep(.25)
+                    with self.lock:
+                        self.stop_notice = f'已捕获并保存 Session ID：{self.ai_session_id}'
+                    self.stop()
+                    return
+                time.sleep(.05)
+        with self.lock:
+            self.stop_notice = '已连续发送 6 次 Ctrl+C，但没有检测到恢复命令；终端已停止，会话文件仍保留。'
+        self.stop()
 
 
 class TerminalManager:

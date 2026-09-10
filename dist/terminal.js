@@ -2,7 +2,7 @@
 // xterm renders the real PTY. No timed prompt injection or readiness guessing.
 (() => {
   let term, fit, sessionId='', cursor=0, timer, running=false, pollGeneration=0, historyVisible=false;
-  let inputQueue='', sending=false, resizeTimer, reportText='', currentInfo=null, available=false;
+  let inputQueue='', sending=false, resizeTimer, reportText='', currentInfo=null, available=false, stopping=false;
   let rules=null, editorBase=0, editorDirty=false, previewText='', previewAction=null, projectSnapshot=null, initialProjectSnapshot=null, lastReportAt=0, starting=false, resumePending=false;
   const request=api;
   const draftKey='logscopeAnalysisQuestion';
@@ -18,7 +18,7 @@
     const command=$('#terminalCommand').value.trim()||'未设置命令';
     $('#launchSummary').textContent=command+($('#terminalLaunchMode').value==='argument'?' · 自动读取任务':' · AI 就绪后发送任务');
   }
-  function stateLabel(state){return state==='running'?'运行中':state==='stopped'?'已结束':state==='interrupted'?'待恢复':state==='exited'?'已退出':'已保存';}
+  function stateLabel(state){return state==='running'?'运行中':state==='stopping'?'正在安全结束':state==='stopped'?'已结束':state==='interrupted'?'待恢复':state==='exited'?'已退出':'已保存';}
   function updateResumeControl(){
     const button=$('#resumeTerminal');
     button.disabled=running||resumePending;
@@ -41,10 +41,12 @@
   }
   function setStatus(info) {
     currentInfo={...currentInfo,...info};
-    running=info.state==='running';$('#terminalWorkspace').classList.toggle('connected',running);
-    $('#terminalState').textContent=running?'终端运行中':stateLabel(info.state);
+    stopping=info.state==='stopping';running=info.state==='running'||stopping;$('#terminalWorkspace').classList.toggle('connected',running);
+    $('#terminalState').textContent=stopping?'正在保存会话':running?'终端运行中':stateLabel(info.state);
     $('#terminalCwd').textContent=info.cwd||'';
-    for(const id of ['sendTask','interruptTerminal','stopTerminal','sendLatestRules'])$('#'+id).disabled=!running;
+    for(const id of ['sendTask','interruptTerminal','sendLatestRules'])$('#'+id).disabled=!running||stopping;
+    $('#stopTerminal').disabled=!running;
+    $('#stopTerminal').textContent=stopping?'强制结束':'结束终端';
     $('#sendTask').textContent=currentInfo.launch_mode==='argument'?'重新发送任务':'AI 就绪后发送任务';
     $('#analysisSessionBar').hidden=false;
     $('#sessionIdentity').hidden=false;
@@ -59,9 +61,10 @@
     const project=currentInfo.project?` · 代码 ${currentInfo.project.branch} @ ${currentInfo.project.commit.slice(0,12)}`:'';
     $('#sessionTaskSummary').textContent=`本次会话：${currentInfo.name||currentInfo.dataset||''} · 初始规则 v${currentInfo.rules_version||'?'}${updates.length?' · 已准备更新 v'+updates[updates.length-1].version:''}${project} · ${currentInfo.question||'未填写问题'}`;
     if(info.error)notice(info.error);
+    else if(info.stop_notice)notice(info.stop_notice);
   }
   async function queueInput(data) {
-    if(!sessionId||!running)throw new Error('请先启动终端');
+    if(!sessionId||!running||stopping)throw new Error(stopping?'终端正在安全结束，请稍候':'请先启动终端');
     inputQueue+=data;
     if(sending)return;
     sending=true;
@@ -325,7 +328,7 @@
   $('#copyTaskPreview').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(previewText);toast('任务内容已复制');}catch{toast('复制失败，请选中任务内容手动复制');}});
   async function selectTask(target){
     const items=await sessions(),selected=items.find(s=>s.id===target);if(!selected)return;
-    if(selected.live&&selected.state==='running')await connect(selected);else await openHistory(selected);
+    if(selected.live&&(selected.state==='running'||selected.state==='stopping'))await connect(selected);else await openHistory(selected);
   }
   $('#terminalSessions').addEventListener('change',async()=>{try{await selectTask($('#terminalSessions').value);}catch(e){notice(e.message);}});
   $('#taskTabs').addEventListener('click',async event=>{const button=event.target.closest('[data-task-id]');if(!button)return;try{await selectTask(button.dataset.taskId);}catch(e){notice(e.message);}});
@@ -401,7 +404,19 @@
     finally{$('#sendLatestRules').disabled=!running;}
   });
   $('#interruptTerminal').addEventListener('click',()=>{queueInput('\x03').catch(e=>notice(e.message));term?.focus();});
-  $('#stopTerminal').addEventListener('click',async()=>{try{await request('/api/terminal/stop',{id:sessionId});setStatus({...currentInfo,state:'stopped'});await sessions();}catch(e){notice(e.message);}});
+  $('#stopTerminal').addEventListener('click',async()=>{
+    try{
+      if(stopping){
+        if(!confirm('还没有检测到 AI 输出的恢复命令。确定强制结束吗？强制结束可能无法自动保存 Session ID。'))return;
+        const info=await request('/api/terminal/stop',{id:sessionId,mode:'force'});setStatus(info);
+        notice(info.ai_session_id?`终端已结束，Session ID ${info.ai_session_id} 已保存。`:'终端已强制结束；没有检测到 Session ID。');
+      }else{
+        const info=await request('/api/terminal/stop',{id:sessionId,mode:'graceful'});setStatus(info);
+        notice('正在连续发送 Ctrl+C，并等待 AI 输出 --resume / --sessions 和 Session ID；捕获后会自动保存并关闭，多次仍未捕获也会自动停止。');
+      }
+      await sessions();
+    }catch(e){notice(e.message);toast(e.message);}
+  });
   $('#toggleFullscreen').addEventListener('click',()=>{$('#terminalWorkspace').classList.toggle('fullscreen');fit?.fit();term?.focus();});
   $('#copySelection').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(term?.getSelection()||'');toast('已复制选中内容');}catch{toast('请使用 Ctrl+Shift+C 复制选中内容');}});
   $('#pasteTerminal').addEventListener('click',async()=>{try{const text=await navigator.clipboard.readText();term.paste(text);term.focus();}catch{toast('请在终端中使用 Ctrl+Shift+V 粘贴');}});
@@ -413,7 +428,7 @@
     if(e.detail!=='terminal')return;
     try{
       initialize();fit.fit();datasetLabel();await refreshRules();
-      if(!loaded){await configuration();const items=await sessions();const previous=items.find(s=>s.id===sessionStorage.getItem('logscopeTerminal'));if(previous){if(previous.live&&previous.state==='running')await connect(previous);else await openHistory(previous);}loaded=true;}
+      if(!loaded){await configuration();const items=await sessions();const previous=items.find(s=>s.id===sessionStorage.getItem('logscopeTerminal'));if(previous){if(previous.live&&(previous.state==='running'||previous.state==='stopping'))await connect(previous);else await openHistory(previous);}loaded=true;}
     }catch(error){notice(error.message);}
   });
 })();

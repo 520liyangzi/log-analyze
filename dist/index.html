@@ -18,7 +18,7 @@
   <div id="datasetInfo" class="dataset-info">上传外层 ZIP，自动检索所有节点。</div>
   <button id="sideUpload" class="outline wide">＋ 导入日志包</button>
   <button id="deleteDataset" class="danger-outline wide" disabled>删除当前日志包</button>
-  <div class="side-bottom"><div class="local-badge"><span></span> 本机存储 · 离线搜索</div><p>日志搜索与索引都在本机运行；AI 排查使用你本机已有的 Claude 或公司工具。</p><div class="version">LOGSCOPE <span>v1.11</span></div></div>
+  <div class="side-bottom"><div class="local-badge"><span></span> 本机存储 · 离线搜索</div><p>日志搜索与索引都在本机运行；AI 排查使用你本机已有的 Claude 或公司工具。</p><div class="version">LOGSCOPE <span>v1.12</span></div></div>
 </aside>
 <main>
   <header class="topbar"><div><span class="breadcrumb">工作空间</span><span class="slash">/</span><span id="viewLabel">全局搜索</span></div><span class="quiet">本机离线索引</span></header>
@@ -54,7 +54,7 @@
       <div class="analysis-session-bar" id="analysisSessionBar" hidden><span id="sessionTaskSummary"></span><button class="text-button" id="viewSessionTask">查看任务</button><button class="text-button" id="sendLatestRules" disabled>发送最新规则</button></div>
       <div class="session-identity" id="sessionIdentity" hidden><label>AI Session ID <input id="aiSessionId" placeholder="a0c43b85-1ca0-41e3-8e99-15648dd3ec17" spellcheck="false"></label><button class="quiet" id="saveAiSessionId">保存 ID</button><button class="quiet" id="viewTerminalHistory" disabled>查看终端记录</button><button class="primary" id="resumeTerminal" disabled>恢复这个对话</button><button class="delete-session-button" id="deleteTerminalSession" disabled>删除会话</button><span id="sessionIdentityHint">若终端输出包含 Session ID 会自动识别，也可手动粘贴。</span></div>
       <div class="terminal-workspace" id="terminalWorkspace">
-        <div class="terminal-toolbar"><div class="terminal-title"><span class="terminal-dot"></span><strong id="terminalState">尚未启动</strong><select id="terminalSessions" aria-label="选择终端会话"><option value="">选择会话</option></select></div><div class="terminal-actions"><button id="sendTask" disabled>AI 就绪后发送任务</button><button id="interruptTerminal" disabled>Ctrl+C</button><button id="toggleFullscreen" aria-label="终端全屏">⛶ 全屏</button><button id="stopTerminal" disabled>结束终端</button></div></div>
+        <div class="terminal-toolbar"><div class="terminal-title"><span class="terminal-dot"></span><strong id="terminalState">尚未启动</strong><select id="terminalSessions" aria-label="选择终端会话"><option value="">选择会话</option></select></div><div class="terminal-actions"><button id="sendTask" disabled>AI 就绪后发送任务</button><button id="interruptTerminal" disabled>Ctrl+C</button><button id="toggleFullscreen" aria-label="终端全屏">⛶ 全屏</button><button id="stopTerminal" disabled title="先发送 Ctrl+C，保存恢复 ID 后再关闭终端">结束终端</button></div></div>
         <div id="terminalMount" aria-label="本机交互终端"></div>
         <div class="terminal-footer"><span id="terminalCwd">终端尚未启动。任务、终端记录和报告会自动保存在本机。</span><button id="copySelection">复制选中内容</button><button id="pasteTerminal">粘贴</button></div>
       </div>
