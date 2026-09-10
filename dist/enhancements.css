@@ -135,6 +135,15 @@
 .session-identity label { min-width: 330px; flex: 1; color: #526985; font-size: .78rem; }
 .session-identity input { margin-top: 5px; font-family: var(--mono); }
 #sessionIdentityHint { flex-basis: 100%; color: #788ba4; font-size: .78rem; }
+.delete-session-button {
+  border: 1px solid #e0a6b1;
+  border-radius: 7px;
+  padding: 10px 13px;
+  color: #a63048;
+  background: #fff7f8;
+  font-size: .8rem;
+}
+.delete-session-button:hover { background: #ffeaed; }
 @media (max-width: 740px) {
   .analysis-flow,.analysis-speed-note { margin-left: 16px; margin-right: 16px; }
   .analysis-flow i { display: none; }

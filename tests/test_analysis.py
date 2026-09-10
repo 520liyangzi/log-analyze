@@ -173,6 +173,8 @@ print('RESUME_ARGS=' + '|'.join(sys.argv[1:]), flush=True)
             output, cursor = self.output_until(identifier, 'HISTORY_SAVED')
             detected = self.api(f'/api/terminal/output?id={identifier}&cursor={cursor}')
             self.assertEqual(detected['ai_session_id'], session_uuid)
+            with self.assertRaises(HTTPError):
+                self.api('/api/terminal/delete', dict(id=identifier))
             saved = self.api('/api/terminal/session-id', dict(id=identifier, ai_session_id=session_uuid))
             self.assertEqual(saved['ai_session_id'], session_uuid)
             with self.assertRaises(HTTPError):
@@ -198,6 +200,13 @@ print('RESUME_ARGS=' + '|'.join(sys.argv[1:]), flush=True)
             listed = next(item for item in self.api('/api/terminal/sessions') if item['id'] == identifier)
             self.assertEqual(listed['ai_session_id'], session_uuid)
             self.assertTrue(listed['saved'])
+            self.api('/api/terminal/stop', dict(id=identifier))
+            deleted = self.api('/api/terminal/delete', dict(id=identifier))
+            self.assertTrue(deleted['ok'])
+            self.assertFalse(directory.exists())
+            self.assertNotIn(identifier, [item['id'] for item in self.api('/api/terminal/sessions')])
+            with self.assertRaises(HTTPError):
+                self.api('/api/terminal/history?id=' + identifier)
         finally:
             active = self.server.terminals.sessions.get(identifier)
             if active and active.state == 'running':

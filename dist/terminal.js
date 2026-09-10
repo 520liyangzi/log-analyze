@@ -42,6 +42,7 @@
     $('#sessionIdentity').hidden=false;
     if(document.activeElement!==$('#aiSessionId'))$('#aiSessionId').value=currentInfo.ai_session_id||'';
     $('#resumeTerminal').disabled=running||!currentInfo.ai_session_id;
+    $('#deleteTerminalSession').disabled=running;
     $('#sessionIdentityHint').textContent=currentInfo.ai_session_id
       ? `已保存 Session ID；${running?'当前对话仍在运行':'可按启动设置中的模板恢复对话'}。`
       : '若终端输出包含 Session ID 会自动识别，也可手动粘贴。';
@@ -298,6 +299,22 @@
       const info=await request('/api/terminal/resume',{id:sessionId,ai_session_id:$('#aiSessionId').value,cols:term.cols,rows:term.rows});
       await connect(info);notice(`已执行恢复命令，Session ID：${info.ai_session_id}。`);
     }catch(e){notice(e.message);toast(e.message);setStatus(currentInfo);}
+  });
+  $('#deleteTerminalSession').addEventListener('click',async()=>{
+    if(!sessionId||running)return;
+    const label=currentInfo?.question||currentInfo?.name||sessionId;
+    if(!confirm(`确定删除这个 AI 排查会话吗？\n\n${label}\n\n任务文件、Session ID、终端记录和 report.md 都会永久删除，无法恢复。`))return;
+    const target=sessionId;$('#deleteTerminalSession').disabled=true;
+    try{
+      await request('/api/terminal/delete',{id:target});
+      clearTimeout(timer);++pollGeneration;sessionId='';cursor=0;currentInfo=null;running=false;reportText='';
+      sessionStorage.removeItem('logscopeTerminal');initialize();term.reset();
+      term.writeln('\x1b[38;5;111mLogScope · AI 排查终端\x1b[0m');term.writeln('排查会话已删除，可以开始新的任务。');
+      $('#analysisSessionBar').hidden=true;$('#sessionIdentity').hidden=true;$('#terminalWorkspace').classList.remove('connected');
+      $('#terminalState').textContent='尚未启动';$('#terminalCwd').textContent='终端尚未启动。任务、终端记录和报告会自动保存在本机。';
+      $('#terminalReport').textContent='Agent 写入 report.md 后，可在这里查看。终端内的分析回复也会正常显示。';
+      $('#codeInvestigation').hidden=true;await sessions();toast('AI 排查会话已删除');notice('会话及其任务文件、终端记录和报告已删除。');
+    }catch(e){toast(e.message);notice(e.message);$('#deleteTerminalSession').disabled=false;}
   });
   $('#sendTask').addEventListener('click',async()=>{try{if(sending)throw new Error('输入正在发送，请稍后重试');const target=sessionId;const config=await request('/api/terminal/config');if(target!==sessionId)throw new Error('会话已切换，请重新发送');await queueInput(config.prompt+'\r');term.focus();notice('读取任务的指令已发送。请查看 AI 回复确认；若当前仍是 CMD，请先启动 AI 再发送。');}catch(e){notice(e.message);}});
   $('#sendLatestRules').addEventListener('click',async()=>{

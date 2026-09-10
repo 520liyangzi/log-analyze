@@ -19,7 +19,7 @@
   <div id="datasetInfo" class="dataset-info">上传外层 ZIP，自动检索所有节点。</div>
   <button id="sideUpload" class="outline wide">＋ 导入日志包</button>
   <button id="deleteDataset" class="danger-outline wide" disabled>删除当前日志包</button>
-  <div class="side-bottom"><div class="local-badge"><span></span> 本机存储 · 离线搜索</div><p>搜索在本机运行。AI 问诊或 Agent 分析时，会使用你配置的模型服务。</p><div class="version">LOGSCOPE <span>v1.5</span></div></div>
+  <div class="side-bottom"><div class="local-badge"><span></span> 本机存储 · 离线搜索</div><p>搜索在本机运行。AI 问诊或 Agent 分析时，会使用你配置的模型服务。</p><div class="version">LOGSCOPE <span>v1.7</span></div></div>
 </aside>
 <main>
   <header class="topbar"><div><span class="breadcrumb">工作空间</span><span class="slash">/</span><span id="viewLabel">全局搜索</span></div><button id="settings" class="quiet">⚙ API 模型配置</button></header>
@@ -52,7 +52,7 @@
       </div>
       <div class="task-window-panel"><div class="task-window-heading"><span><strong>排查窗口</strong> · 可同时运行 3 个，历史任务不限</span><button class="text-button" id="refreshTaskWindows">刷新</button></div><div class="task-tabs" id="taskTabs"><span class="subtle">启动任务后会显示在这里</span></div></div>
       <div class="analysis-session-bar" id="analysisSessionBar" hidden><span id="sessionTaskSummary"></span><button class="text-button" id="viewSessionTask">查看任务</button><button class="text-button" id="sendLatestRules" disabled>发送最新规则</button></div>
-      <div class="session-identity" id="sessionIdentity" hidden><label>AI Session ID <input id="aiSessionId" placeholder="a0c43b85-1ca0-41e3-8e99-15648dd3ec17" spellcheck="false"></label><button class="quiet" id="saveAiSessionId">保存 ID</button><button class="primary" id="resumeTerminal" disabled>恢复这个对话</button><span id="sessionIdentityHint">若终端输出包含 Session ID 会自动识别，也可手动粘贴。</span></div>
+      <div class="session-identity" id="sessionIdentity" hidden><label>AI Session ID <input id="aiSessionId" placeholder="a0c43b85-1ca0-41e3-8e99-15648dd3ec17" spellcheck="false"></label><button class="quiet" id="saveAiSessionId">保存 ID</button><button class="primary" id="resumeTerminal" disabled>恢复这个对话</button><button class="delete-session-button" id="deleteTerminalSession" disabled>删除会话</button><span id="sessionIdentityHint">若终端输出包含 Session ID 会自动识别，也可手动粘贴。</span></div>
       <div class="terminal-workspace" id="terminalWorkspace">
         <div class="terminal-toolbar"><div class="terminal-title"><span class="terminal-dot"></span><strong id="terminalState">尚未启动</strong><select id="terminalSessions" aria-label="选择终端会话"><option value="">选择会话</option></select></div><div class="terminal-actions"><button id="sendTask" disabled>AI 就绪后发送任务</button><button id="interruptTerminal" disabled>Ctrl+C</button><button id="toggleFullscreen" aria-label="终端全屏">⛶ 全屏</button><button id="stopTerminal" disabled>结束终端</button></div></div>
         <div id="terminalMount" aria-label="本机交互终端"></div>

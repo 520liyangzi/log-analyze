@@ -363,7 +363,7 @@ class TerminalManager:
         if not re.fullmatch(r'[0-9a-f]{32}', str(identifier)):
             raise ValueError('排查任务不存在')
         directory = self.directory / identifier
-        if not directory.is_dir():
+        if directory.is_symlink() or not directory.is_dir():
             raise ValueError('排查任务不存在')
         return directory
 
@@ -535,6 +535,22 @@ class TerminalManager:
                     file.seek(size - 2 * 1024 * 1024); truncated = True
                 raw = file.read()
         return dict(info=info, transcript=raw.decode('utf-8', 'replace'), truncated=truncated)
+
+    def delete(self, body):
+        identifier = str(body.get('id', ''))
+        with self.lock:
+            session = self.sessions.get(identifier)
+            if session and session.state == 'running':
+                raise ValueError('排查会话仍在运行，请先结束终端再删除')
+        directory = self.session_directory(identifier)
+        if session:
+            session.reader.join(timeout=3)
+            if session.reader.is_alive():
+                raise ValueError('终端进程正在释放资源，请稍后再删除')
+        with self.lock:
+            self.sessions.pop(identifier, None)
+            shutil.rmtree(directory)
+        return dict(ok=True, id=identifier)
 
     def dataset_in_use(self, identifier):
         with self.lock:

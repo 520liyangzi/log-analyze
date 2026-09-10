@@ -659,7 +659,7 @@ def ai_analyze(store, payload):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.6'
+    server_version = 'LogScope/1.7'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -831,6 +831,8 @@ class Handler(BaseHTTPRequestHandler):
                 elif parsed.path == '/api/terminal/stop':
                     self.server.terminals.get(body['id']).stop()
                     self.json({'ok': True})
+                elif parsed.path == '/api/terminal/delete':
+                    self.json(self.server.terminals.delete(body))
                 elif parsed.path == '/api/ai/config':
                     base_url = str(body.get('base_url', '')).strip().rstrip('/')
                     if base_url and (urlsplit(base_url).scheme not in ('http', 'https') or not urlsplit(base_url).hostname or urlsplit(base_url).username):
