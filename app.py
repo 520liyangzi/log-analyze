@@ -659,7 +659,7 @@ def ai_analyze(store, payload):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.5'
+    server_version = 'LogScope/1.6'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -717,6 +717,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(self.server.terminals.list())
             elif parsed.path == '/api/terminal/output':
                 self.json(self.server.terminals.get(params['id']).poll(params.get('cursor', 0)))
+            elif parsed.path == '/api/terminal/history':
+                self.json(self.server.terminals.history(params['id']))
             elif parsed.path == '/api/terminal/report':
                 self.json(self.server.terminals.report(params['id']))
             elif parsed.path == '/api/project/branches':
@@ -809,6 +811,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.json(self.server.terminals.update_rules(body))
                 elif parsed.path == '/api/terminal/start':
                     self.json(self.server.terminals.start(body), 201)
+                elif parsed.path == '/api/terminal/resume':
+                    self.json(self.server.terminals.resume(body), 201)
+                elif parsed.path == '/api/terminal/session-id':
+                    self.json(self.server.terminals.save_ai_session_id(body))
                 elif parsed.path == '/api/datasets/delete':
                     identifier = str(body.get('dataset', ''))
                     if self.server.terminals.dataset_in_use(identifier):

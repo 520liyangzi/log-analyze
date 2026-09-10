@@ -17,6 +17,7 @@
     const command=$('#terminalCommand').value.trim()||'未设置命令';
     $('#launchSummary').textContent=command+($('#terminalLaunchMode').value==='argument'?' · 自动读取任务':' · AI 就绪后发送任务');
   }
+  function stateLabel(state){return state==='running'?'运行中':state==='stopped'?'已结束':state==='interrupted'?'待恢复':state==='exited'?'已退出':'已保存';}
   function initialize() {
     if(term)return;
     term=new Terminal({cursorBlink:true,fontFamily:'"Cascadia Mono", Consolas, "SFMono-Regular", monospace',fontSize:14,
@@ -33,11 +34,17 @@
   function setStatus(info) {
     currentInfo={...currentInfo,...info};
     running=info.state==='running';$('#terminalWorkspace').classList.toggle('connected',running);
-    $('#terminalState').textContent=running?'终端运行中':info.state==='stopped'?'终端已结束':'进程已退出';
+    $('#terminalState').textContent=running?'终端运行中':stateLabel(info.state);
     $('#terminalCwd').textContent=info.cwd||'';
     for(const id of ['sendTask','interruptTerminal','stopTerminal','sendLatestRules'])$('#'+id).disabled=!running;
     $('#sendTask').textContent=currentInfo.launch_mode==='argument'?'重新发送任务':'AI 就绪后发送任务';
     $('#analysisSessionBar').hidden=false;
+    $('#sessionIdentity').hidden=false;
+    if(document.activeElement!==$('#aiSessionId'))$('#aiSessionId').value=currentInfo.ai_session_id||'';
+    $('#resumeTerminal').disabled=running||!currentInfo.ai_session_id;
+    $('#sessionIdentityHint').textContent=currentInfo.ai_session_id
+      ? `已保存 Session ID；${running?'当前对话仍在运行':'可按启动设置中的模板恢复对话'}。`
+      : '若终端输出包含 Session ID 会自动识别，也可手动粘贴。';
     const updates=currentInfo.rule_updates||[];
     $('#sessionTaskSummary').textContent=`本次会话：${currentInfo.name||currentInfo.dataset||''} · 初始规则 v${currentInfo.rules_version||'?'}${updates.length?' · 已准备更新 v'+updates[updates.length-1].version:''} · ${currentInfo.question||'未填写问题'}`;
     if(info.error)notice(info.error);
@@ -79,20 +86,36 @@
         else await sessions();
       }catch(e){
         if(generation!==pollGeneration)return;
-        notice('终端连接中断：'+e.message+'。页面会自动重试；服务重启后需要新建终端。');timer=setTimeout(poll,2000);
+        notice('终端连接中断：'+e.message+'。页面会自动重试；服务重启后可用保存的 Session ID 恢复。');timer=setTimeout(poll,2000);
       }
     };
     poll();
   }
+  async function openHistory(info){
+    if(sending)throw new Error('输入正在发送，请稍后切换窗口');
+    clearTimeout(timer);++pollGeneration;sessionId=info.id;cursor=0;inputQueue='';currentInfo=info;running=false;
+    sessionStorage.setItem('logscopeTerminal',sessionId);initialize();term.reset();
+    const result=await request('/api/terminal/history?id='+sessionId);
+    currentInfo=result.info;setStatus(result.info);
+    if(result.truncated)term.writeln('\x1b[38;5;214m[较早的终端记录已省略，当前显示最后 2 MB]\x1b[0m');
+    if(result.transcript)await new Promise(resolve=>term.write(result.transcript,resolve));
+    else term.writeln('\x1b[38;5;111m[这个任务还没有保存终端输出]\x1b[0m');
+    await sessions();await loadReport(true);fit.fit();
+    notice(result.info.ai_session_id?'历史任务已打开；点击「恢复这个对话」可继续排查。':'历史任务已打开。保存 AI Session ID 后可以恢复原对话。');
+  }
+  function renderTaskTabs(items){
+    $('#taskTabs').innerHTML=items.length?items.map(s=>`<button class="task-tab${s.id===sessionId?' active':''}" data-task-id="${s.id}" title="${escapeHTML(s.question||s.name||'排查任务')}"><i class="task-tab-state ${s.state}"></i><span class="task-tab-label">${escapeHTML(s.question||s.name||'排查任务')} · ${stateLabel(s.state)}</span></button>`).join(''):'<span class="subtle">启动任务后会显示在这里</span>';
+  }
   async function sessions() {
     const items=await request('/api/terminal/sessions');
-    $('#terminalSessions').innerHTML='<option value="">选择会话</option>'+items.map((s,i)=>`<option value="${s.id}">${i+1} · ${s.state==='running'?'运行中':'已结束'} · ${escapeHTML(s.question||s.name||s.command||'Shell')}</option>`).join('');
+    $('#terminalSessions').innerHTML='<option value="">选择会话</option>'+items.map((s,i)=>`<option value="${s.id}">${i+1} · ${stateLabel(s.state)} · ${escapeHTML(s.question||s.name||s.command||'Shell')}</option>`).join('');
     $('#terminalSessions').value=sessionId;
+    renderTaskTabs(items);
     return items;
   }
   async function configuration() {
     const config=await request('/api/terminal/config');
-    $('#terminalCommand').value=config.command;$('#terminalLaunchMode').value=config.launch_mode;
+    $('#terminalCommand').value=config.command;$('#terminalLaunchMode').value=config.launch_mode;$('#resumeCommandTemplate').value=config.resume_template;
     available=config.available;
     $('#terminalCapability').textContent=config.available?config.platform:config.reason;
     $('#terminalStart').disabled=!available;$('#shellStart').disabled=!available;
@@ -100,7 +123,7 @@
     launchLabel();return config;
   }
   async function saveSettings(){
-    await request('/api/terminal/config',{command:$('#terminalCommand').value,launch_mode:$('#terminalLaunchMode').value});
+    await request('/api/terminal/config',{command:$('#terminalCommand').value,launch_mode:$('#terminalLaunchMode').value,resume_template:$('#resumeCommandTemplate').value});
     launchLabel();
   }
   async function refreshRules(){
@@ -256,7 +279,26 @@
     }catch(e){toast(e.message);}
   });
   $('#copyTaskPreview').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(previewText);toast('任务内容已复制');}catch{toast('复制失败，请选中任务内容手动复制');}});
-  $('#terminalSessions').addEventListener('change',async()=>{try{const target=$('#terminalSessions').value;const items=await sessions();const selected=items.find(s=>s.id===target);if(selected)await connect(selected);}catch(e){notice(e.message);}});
+  async function selectTask(target){
+    const items=await sessions(),selected=items.find(s=>s.id===target);if(!selected)return;
+    if(selected.live&&selected.state==='running')await connect(selected);else await openHistory(selected);
+  }
+  $('#terminalSessions').addEventListener('change',async()=>{try{await selectTask($('#terminalSessions').value);}catch(e){notice(e.message);}});
+  $('#taskTabs').addEventListener('click',async event=>{const button=event.target.closest('[data-task-id]');if(!button)return;try{await selectTask(button.dataset.taskId);}catch(e){notice(e.message);}});
+  $('#refreshTaskWindows').addEventListener('click',async()=>{try{await sessions();toast('排查窗口已刷新');}catch(e){toast(e.message);}});
+  $('#saveAiSessionId').addEventListener('click',async()=>{
+    if(!sessionId)return toast('请先选择一个排查任务');
+    try{const info=await request('/api/terminal/session-id',{id:sessionId,ai_session_id:$('#aiSessionId').value});currentInfo=info;setStatus(info);await sessions();toast('Session ID 已保存');}catch(e){toast(e.message);}
+  });
+  $('#resumeTerminal').addEventListener('click',async()=>{
+    if(!sessionId||running)return;
+    $('#resumeTerminal').disabled=true;
+    try{
+      initialize();fit.fit();await saveSettings();
+      const info=await request('/api/terminal/resume',{id:sessionId,ai_session_id:$('#aiSessionId').value,cols:term.cols,rows:term.rows});
+      await connect(info);notice(`已执行恢复命令，Session ID：${info.ai_session_id}。`);
+    }catch(e){notice(e.message);toast(e.message);setStatus(currentInfo);}
+  });
   $('#sendTask').addEventListener('click',async()=>{try{if(sending)throw new Error('输入正在发送，请稍后重试');const target=sessionId;const config=await request('/api/terminal/config');if(target!==sessionId)throw new Error('会话已切换，请重新发送');await queueInput(config.prompt+'\r');term.focus();notice('读取任务的指令已发送。请查看 AI 回复确认；若当前仍是 CMD，请先启动 AI 再发送。');}catch(e){notice(e.message);}});
   $('#sendLatestRules').addEventListener('click',async()=>{
     if(!confirm('请确认 AI 已进入对话界面且可以接收输入。将发送最新已保存规则，请它重新核对本次分析。继续？'))return;

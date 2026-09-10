@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 from analysis_rules import AnalysisRules
 from app import make_server
 from demo import create_demo
-from terminal_bridge import TASK_PROMPT
+from terminal_bridge import TASK_PROMPT, TerminalManager
 
 
 class AnalysisTests(unittest.TestCase):
@@ -156,6 +156,52 @@ print('FOLLOWUP_'+answer,flush=True)
             finally:
                 self.api('/api/terminal/stop', dict(id=manual['id']))
         finally:
+            self.api('/api/terminal/config', old_config)
+
+    def test_saved_task_history_session_id_and_company_resume_command(self):
+        fake = Path(self.temp.name) / 'resume agent.py'
+        fake.write_text("""import sys
+print('RESUME_ARGS=' + '|'.join(sys.argv[1:]), flush=True)
+""", 'utf-8')
+        command = subprocess.list2cmdline([sys.executable, str(fake)]) if os.name == 'nt' else shlex.join([sys.executable, str(fake)])
+        old_config = self.api('/api/terminal/config')
+        session_uuid = 'a0c43b85-1ca0-41e3-8e99-15648dd3ec17'
+        info = self.api('/api/terminal/start', dict(dataset=self.dataset, question='需要保存并恢复的排查', run_command=False))
+        identifier, directory = info['id'], Path(info['cwd'])
+        try:
+            self.api('/api/terminal/input', dict(id=identifier, data='echo HISTORY_SAVED Session ID: ' + session_uuid + '\r'))
+            output, cursor = self.output_until(identifier, 'HISTORY_SAVED')
+            detected = self.api(f'/api/terminal/output?id={identifier}&cursor={cursor}')
+            self.assertEqual(detected['ai_session_id'], session_uuid)
+            saved = self.api('/api/terminal/session-id', dict(id=identifier, ai_session_id=session_uuid))
+            self.assertEqual(saved['ai_session_id'], session_uuid)
+            with self.assertRaises(HTTPError):
+                self.api('/api/terminal/session-id', dict(id=identifier, ai_session_id='not-a-uuid'))
+            self.api('/api/terminal/stop', dict(id=identifier))
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and 'HISTORY_SAVED' not in (directory / 'terminal.log').read_text('utf-8', errors='replace'):
+                time.sleep(.03)
+            history = self.api('/api/terminal/history?id=' + identifier)
+            self.assertIn('HISTORY_SAVED', history['transcript'])
+            self.assertEqual(history['info']['ai_session_id'], session_uuid)
+            self.assertTrue((directory / 'session.json').exists())
+            restarted = TerminalManager(self.server.store, self.url)
+            restored = next(item for item in restarted.list() if item['id'] == identifier)
+            self.assertFalse(restored['live'])
+            self.assertEqual(restored['ai_session_id'], session_uuid)
+            self.api('/api/terminal/config', dict(command=command, launch_mode='manual',
+                                                   resume_template='{command} --sessions {session_id}'))
+            resumed = self.api('/api/terminal/resume', dict(id=identifier, ai_session_id=session_uuid))
+            self.assertEqual(resumed['id'], identifier)
+            output, _ = self.output_until(identifier, 'RESUME_ARGS=--sessions|' + session_uuid)
+            self.assertIn('RESUME_ARGS=--sessions|' + session_uuid, output)
+            listed = next(item for item in self.api('/api/terminal/sessions') if item['id'] == identifier)
+            self.assertEqual(listed['ai_session_id'], session_uuid)
+            self.assertTrue(listed['saved'])
+        finally:
+            active = self.server.terminals.sessions.get(identifier)
+            if active and active.state == 'running':
+                self.api('/api/terminal/stop', dict(id=identifier))
             self.api('/api/terminal/config', old_config)
 
     def test_code_followup_preview_fixed_branch_and_read_only_query(self):
