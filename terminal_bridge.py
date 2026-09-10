@@ -328,6 +328,10 @@ class TerminalManager:
         with self.lock:
             return [s.info() for s in self.sessions.values()]
 
+    def dataset_in_use(self, identifier):
+        with self.lock:
+            return any(s.dataset == identifier and s.state == 'running' for s in self.sessions.values())
+
     def report(self, identifier):
         session = self.get(identifier)
         path = session.directory / 'report.md'

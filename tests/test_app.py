@@ -80,6 +80,8 @@ class LogTests(unittest.TestCase):
         result=self.search(node='node-a',kind='root',thread='http-nio-uds-exec-7',start='2026-09-08 09:55:14.000 +0800',end='2026-09-08 09:55:14.999 +0800')
         self.assertEqual(result['summary']['total'],2)
         self.assertEqual(result['summary']['errors'],1)
+        pasted=self.search(node='node-a',kind='root',start='2026-09-08 09:55:14.000',end='2026-09-08 09:55:14.999')
+        self.assertEqual(pasted['summary']['total'],2)
 
     def test_complete_pagination_and_export(self):
         params=dict(dataset=self.identifier,q='/api/model/map',kind='access')

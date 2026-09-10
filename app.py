@@ -201,13 +201,14 @@ class Store:
         try:
             with self.connect() as db:
                 def add_record(fid, line, end_line, raw, parsed):
-                    cursor = db.execute('''INSERT INTO logs(dataset,file_id,line,end_line,ts,time,level,thread,trace,span,method,url,status,duration,raw)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                        (identifier, fid, line, end_line, *[parsed[k] for k in ('ts','time','level','thread','trace','span','method','url','status','duration')], raw))
+                    base = ('ts','time','level','thread','trace','span','method','url','status','duration')
+                    columns = ('dataset','file_id','line','end_line',*base,*EXTRA_FIELDS.keys(),'raw')
+                    values = (identifier, fid, line, end_line,
+                              *[parsed[k] for k in base], *[parsed[k] for k in EXTRA_FIELDS], raw)
+                    cursor = db.execute('INSERT INTO logs(' + ','.join(columns) + ') VALUES('
+                                        + ','.join('?' for _ in columns) + ')', values)
                     if self.fts:
                         db.execute('INSERT INTO log_fts(rowid,raw) VALUES(?,?)', (cursor.lastrowid, raw))
-                    db.execute('UPDATE logs SET ' + ','.join(key + '=?' for key in EXTRA_FIELDS) + ' WHERE id=?',
-                               [parsed[key] for key in EXTRA_FIELDS] + [cursor.lastrowid])
                     audit['recognized_time' if parsed['ts'] is not None else 'unrecognized_time'] += 1
                     stats['records'] += 1
 
@@ -336,7 +337,48 @@ class Store:
             if row['parser_version'] < PARSER_VERSION:
                 row['warnings'].append('该日志包使用旧版解析器，请重新上传以修正 Pod 并补充 RouteID 等新字段。')
             row['progress'] = self.progress.get(row['id'])
+            archive = self.directory / 'archives' / (row['id'] + '.zip')
+            row['archive_bytes'] = archive.stat().st_size if archive.exists() else 0
         return rows
+
+    def request_delete(self, identifier):
+        with self.connect() as db:
+            row = db.execute('SELECT state FROM datasets WHERE id=?', (identifier,)).fetchone()
+            if not row:
+                raise ValueError('日志包不存在或已经删除')
+            if row['state'] == 'importing':
+                raise ValueError('日志包正在导入，完成后再删除')
+            if row['state'] == 'deleting':
+                return
+            db.execute("UPDATE datasets SET state='deleting',error='' WHERE id=?", (identifier,))
+        self.pool.submit(self.delete_dataset, identifier, row['state'])
+
+    def delete_dataset(self, identifier, previous_state='ready'):
+        try:
+            with self.connect() as db:
+                if self.fts:
+                    db.execute('DELETE FROM log_fts WHERE rowid IN (SELECT id FROM logs WHERE dataset=?)',
+                               (identifier,))
+                db.execute('DELETE FROM logs WHERE dataset=?', (identifier,))
+                db.execute('DELETE FROM files WHERE dataset=?', (identifier,))
+            (self.directory / 'archives' / (identifier + '.zip')).unlink(missing_ok=True)
+            # Return free pages to the operating system after large packages. If
+            # compaction lacks temporary disk space, the pages remain reusable.
+            try:
+                with self.connect() as db:
+                    db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                    db.execute('VACUUM')
+            except sqlite3.Error:
+                pass
+            with self.connect() as db:
+                db.execute('DELETE FROM datasets WHERE id=?', (identifier,))
+        except Exception as exc:
+            with self.connect() as db:
+                if db.execute('SELECT 1 FROM datasets WHERE id=?', (identifier,)).fetchone():
+                    db.execute('UPDATE datasets SET state=?,error=? WHERE id=?',
+                               (previous_state, '删除失败：' + str(exc), identifier))
+        finally:
+            self.progress.pop(identifier, None)
 
     def require_ready(self, db, identifier):
         row = db.execute('SELECT state FROM datasets WHERE id=?', (identifier,)).fetchone()
@@ -594,7 +636,7 @@ def ai_analyze(store, payload):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.3'
+    server_version = 'LogScope/1.4'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -675,7 +717,8 @@ class Handler(BaseHTTPRequestHandler):
                 result['key_ready'] = bool(os.getenv('LOG_AI_API_KEY'))
                 self.json(result)
             else:
-                routes = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/terminal.js': 'terminal.js',
+                routes = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css',
+                          '/enhancements.css': 'enhancements.css', '/terminal.js': 'terminal.js',
                           '/vendor/xterm.js': 'vendor/xterm.js', '/vendor/xterm.css': 'vendor/xterm.css',
                           '/vendor/addon-fit.js': 'vendor/addon-fit.js'}
                 if parsed.path not in routes:
@@ -737,6 +780,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.json(self.server.terminals.update_rules(body))
                 elif parsed.path == '/api/terminal/start':
                     self.json(self.server.terminals.start(body), 201)
+                elif parsed.path == '/api/datasets/delete':
+                    identifier = str(body.get('dataset', ''))
+                    if self.server.terminals.dataset_in_use(identifier):
+                        raise ValueError('该日志包正在被 AI 终端使用，请先结束对应终端')
+                    self.store.request_delete(identifier)
+                    self.json({'ok': True, 'id': identifier}, 202)
                 elif parsed.path == '/api/terminal/input':
                     self.server.terminals.get(body['id']).write(body.get('data', ''))
                     self.json({'ok': True})

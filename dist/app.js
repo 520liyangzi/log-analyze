@@ -3,7 +3,10 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const escapeHTML = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const number = (n) => Number(n || 0).toLocaleString('zh-CN');
-const state = { dataset: '', files: [], view: 'search', page: 1, tracePage: 1, lastSearch: null, lastTrace: null, rows: new Map(), searchSerial: 0, traceSerial: 0, refreshSerial: 0, correlation: null };
+const UI_STATE_KEY = 'logscope.ui.v1';
+let savedUI={};
+try { savedUI=JSON.parse(localStorage.getItem(UI_STATE_KEY)||'{}'); } catch {}
+const state = { dataset: savedUI.dataset || '', datasets: [], files: [], view: 'search', page: 1, tracePage: 1, lastSearch: null, lastTrace: null, rows: new Map(), searchSerial: 0, traceSerial: 0, refreshSerial: 0, correlation: null };
 let toastTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 4500); }
 async function api(path, body) {
@@ -14,6 +17,34 @@ async function api(path, body) {
 }
 function paramsURL(params) { return new URLSearchParams(Object.entries(params).filter(([,v]) => v !== '' && v != null)).toString(); }
 function needDataset() { if (!state.dataset) { toast('请先导入并选择一个日志包'); return false; } return true; }
+function formState(form) {
+  const result={};
+  for(const element of form.elements) if(element.name||element.id) {
+    const key=element.name||element.id;
+    if(element.type==='checkbox')result[key]=element.checked;
+    else if(!['submit','button','file'].includes(element.type))result[key]=element.value;
+  }
+  return result;
+}
+function saveUI() {
+  const value={dataset:state.dataset,view:state.view,search:formState($('#searchForm')),
+    advanced:$('#advanced').open,trace:$('#traceId').value,aiEndpoint:$('#aiEndpoint').value,
+    aiQuestion:$('#aiQuestion').value,fileSearch:$('#fileSearch').value};
+  try { localStorage.setItem(UI_STATE_KEY,JSON.stringify(value)); } catch {}
+}
+function restoreSearchForm(values={}) {
+  const dynamic=new Set(['node','pod','service','kind']);
+  for(const element of $('#searchForm').elements) {
+    const key=element.name||element.id;
+    if(!key||dynamic.has(key)||values[key]===undefined)continue;
+    if(element.type==='checkbox')element.checked=Boolean(values[key]); else element.value=values[key];
+  }
+  if(values.node){$('#node').value=values.node;updateFilters();}
+  if(values.pod){$('#pod').value=values.pod;updateFilters();}
+  if(values.service){$('#service').value=values.service;updateFilters();}
+  if(values.kind)$('#kind').value=values.kind;
+  $('#advanced').open=Boolean(savedUI.advanced);updateFilters();
+}
 function highlight(raw, keyword) {
   if (!keyword) return escapeHTML(raw);
   const sensitive = state.lastSearch?.case === '1';
@@ -34,6 +65,7 @@ const viewMeta = {
   ai:['API 问诊','从日志线索，到问题原因。','基于实际检索证据分析；由你决定何时连接模型。']
 };
 function setView(view) {
+  if(!viewMeta[view])view='search';
   state.view = view;
   $$('.nav').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   Object.keys(viewMeta).forEach(v => $('#' + v + 'View').hidden = v !== view);
@@ -41,6 +73,7 @@ function setView(view) {
   $('#viewLabel').textContent=label; $('#viewTitle').textContent=title; $('#viewDescription').textContent=description;
   if (view === 'files') renderFiles();
   document.dispatchEvent(new CustomEvent('logscope:view', {detail: view}));
+  saveUI();
 }
 function empty(container, title, message, importButton=false) {
   container.innerHTML = `<div class="empty"><span class="empty-icon">⌕</span><h2>${escapeHTML(title)}</h2><p>${escapeHTML(message)}</p>${importButton ? '<button class="primary" data-action="upload">＋ 导入第一个日志包</button>' : ''}</div>`;
@@ -56,18 +89,23 @@ async function refreshDatasets(selectId) {
   const datasets = await api('/api/datasets');
   if (serial !== state.refreshSerial) return;
   const ready = datasets.filter(d => d.state === 'ready');
+  state.datasets=datasets;
   const previous = state.dataset;
   if (selectId && ready.some(d => d.id === selectId)) state.dataset = selectId;
   else if (!ready.some(d => d.id === state.dataset)) state.dataset = ready[0]?.id || '';
   $('#dataset').innerHTML = ready.length ? ready.map(d => `<option value="${d.id}">${escapeHTML(d.name)}</option>`).join('') : '<option value="">尚未导入日志包</option>';
   $('#dataset').value = state.dataset;
   const current = ready.find(d => d.id === state.dataset);
-  $('#datasetInfo').textContent = current ? `${number(current.files)} 份日志文件 · ${number(current.records)} 条记录${current.audit?.manifest_checked ? ' · 清单缺失 '+number(current.audit.missing_count)+' 份' : ''}` : '上传外层 ZIP，自动检索所有节点。';
+  $('#datasetInfo').textContent = current ? `${number(current.files)} 份日志文件 · ${number(current.records)} 条记录 · 原包 ${formatBytes(current.archive_bytes)}${current.audit?.manifest_checked ? ' · 清单缺失 '+number(current.audit.missing_count)+' 份' : ''}` : '上传外层 ZIP，自动检索所有节点。';
+  $('#deleteDataset').disabled=!current;
   const pending = datasets.find(d => d.state === 'importing');
+  const deleting = datasets.find(d => d.state === 'deleting');
   const failed = datasets.find(d => d.state === 'failed');
   const status = $('#importStatus');
   status.classList.remove('failed');
-  if (pending) {
+  if (deleting) {
+    status.hidden=false;status.textContent=`正在删除 ${deleting.name} 并释放磁盘空间…`;
+  } else if (pending) {
     status.hidden = false;
     status.textContent = `正在解析 ${pending.name} … 已读取 ${number(pending.progress?.files)} 个文件、${number(pending.progress?.records)} 条记录。完成后将自动切换。`;
   } else if (failed && datasets[0]?.id === failed.id && !selectId) {
@@ -80,7 +118,13 @@ async function refreshDatasets(selectId) {
     if (serial !== state.refreshSerial) return;
     updateFilters(); clearResults(); renderFiles();
   }
+  saveUI();
   return datasets;
+}
+function formatBytes(value) {
+  let size=Number(value||0),unit='B';
+  for(const next of ['KB','MB','GB','TB']){if(size<1024)break;size/=1024;unit=next;}
+  return `${size>=10||unit==='B'?size.toFixed(0):size.toFixed(1)} ${unit}`;
 }
 function options(id, values, label) {
   const element = $('#' + id), old = element.value;
@@ -99,8 +143,15 @@ function updateFilters() {
 function searchParams() {
   const params = Object.fromEntries(new FormData($('#searchForm')));
   if (params.pod) { const slash=params.pod.indexOf('/'); params.namespace=params.pod.slice(0,slash); params.pod=params.pod.slice(slash+1); }
-  for (const key of ['start','end']) if (params[key]) { if (params[key].length===16) params[key]+=':00'; params[key] = params[key].replace('T',' ') + ' ' + $('#filterOffset').value; }
-  return {...params,dataset:state.dataset};
+  for (const key of ['start','end']) if (params[key]) params[key]=normalizeTimeFilter(params[key]);
+  saveUI();return {...params,dataset:state.dataset};
+}
+function normalizeTimeFilter(value) {
+  let text=value.trim().replace(/^\[|\]$/g,'').replaceAll('/','-').replace('T',' ');
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(text)) text+=':00';
+  text=text.replace(/([+-]\d{2}):(\d{2})$/,'$1$2');
+  if (!/[+-]\d{4}$/.test(text)) text+=' '+$('#filterOffset').value;
+  return text;
 }
 function rowHTML(row, keyword, timeline=false) {
   state.rows.set(row.id,row);
@@ -145,7 +196,7 @@ async function runTrace(page=1,reuse=false) {
   if (!needDataset()) return;
   const trace=$('#traceId').value.trim(); if (!trace) return;
   const serial=++state.traceSerial;
-  if (!reuse) state.lastTrace={dataset:state.dataset,trace};
+  if (!reuse) {state.lastTrace={dataset:state.dataset,trace};saveUI();}
   const snapshot={...state.lastTrace}; const button=$('#traceForm button'); button.disabled=true;
   try {
     const result=await api('/api/search?'+paramsURL({...snapshot,page}));
@@ -154,7 +205,7 @@ async function runTrace(page=1,reuse=false) {
   } catch(error) { toast(error.message); }
   finally { button.disabled=false; }
 }
-function localInput(ms) { return new Date(ms + 8*3600000).toISOString().slice(0,23); }
+function localInput(ms) { return new Date(ms + 8*3600000).toISOString().slice(0,23).replace('T',' '); }
 function correlationBanner(row, windowSeconds, sameThread) {
   $('#correlation').hidden=false;
   $('#correlation').innerHTML=`候选关联：${escapeHTML(row.pod)} · ${escapeHTML(row.time)} 向前 ${windowSeconds + Math.max(0,row.duration||0)/1000} 秒、向后 ${windowSeconds} 秒（向前含 access 耗时）${sameThread?' · 同线程':''}。时间与线程可能被复用，请结合流水号确认。<button data-action="toggle-thread">${sameThread?'取消线程限制':'限定同线程'}</button><button data-action="widen">扩大到前后 60 秒</button>`;
@@ -187,6 +238,13 @@ async function openSettings() {
   try { const config=await api('/api/ai/config'); $('#baseUrl').value=config.base_url; $('#modelName').value=config.model; $('#keyState').textContent=config.key_ready?'密钥状态：已从环境变量读取':'密钥状态：尚未设置'; $('#configDialog').showModal(); } catch(error) { toast(error.message); }
 }
 function openUpload() { $('#uploadDialog').showModal(); }
+function openDeleteDataset() {
+  const dataset=state.datasets.find(item=>item.id===state.dataset);
+  if(!dataset)return toast('请先选择要删除的日志包');
+  $('#deleteDialog').dataset.id=dataset.id;
+  $('#deleteDatasetInfo').textContent=`${dataset.name} · ${number(dataset.records)} 条记录 · 原始 ZIP ${formatBytes(dataset.archive_bytes)}`;
+  $('#deleteDialog').showModal();
+}
 let selectedFile;
 function chooseFile(file) { if(!file) return; selectedFile=file; $('#chosenName').textContent=`${file.name} · ${(file.size/1024/1024).toFixed(2)} MB`; }
 async function upload(file) {
@@ -228,12 +286,36 @@ $('#aiForm').addEventListener('submit',async e=>{
   catch(error){$('#aiAnswer').textContent=error.message;}
   finally{$('#analyzeButton').disabled=false;}
 });
-$('#dataset').addEventListener('change',async()=>{state.dataset=$('#dataset').value;state.files=[];$('#searchForm').reset();try{await refreshDatasets(state.dataset);}catch(error){toast(error.message);}});
+$('#dataset').addEventListener('change',async()=>{state.dataset=$('#dataset').value;state.files=[];saveUI();try{await refreshDatasets(state.dataset);}catch(error){toast(error.message);}});
 $('#refresh').addEventListener('click',()=>refreshDatasets().catch(e=>toast(e.message)));
 for(const id of ['node','pod','service','kind'])$('#'+id).addEventListener('change',updateFilters);
-$('#resetFilters').addEventListener('click',()=>{$('#searchForm').reset();state.correlation=null;$('#correlation').hidden=true;updateFilters();});
-$('#fileSearch').addEventListener('input',renderFiles);
+$('#resetFilters').addEventListener('click',()=>{$('#searchForm').reset();state.correlation=null;$('#correlation').hidden=true;updateFilters();saveUI();});
+$('#searchForm').addEventListener('input',saveUI);$('#searchForm').addEventListener('change',saveUI);
+$('#advanced').addEventListener('toggle',saveUI);
+for(const id of ['traceId','aiEndpoint','aiQuestion'])$('#'+id).addEventListener('input',saveUI);
+$$('[data-paste-time]').forEach(button=>button.addEventListener('click',async()=>{
+  const input=$('#'+button.dataset.pasteTime);
+  try { input.value=(await navigator.clipboard.readText()).trim();input.focus();saveUI(); }
+  catch { input.focus();toast('浏览器未允许读取剪贴板，请在输入框按 Ctrl+V 粘贴'); }
+}));
+$('#fileSearch').addEventListener('input',()=>{renderFiles();saveUI();});
 for(const id of ['sideUpload','topUpload'])$('#'+id).addEventListener('click',openUpload);
+$('#deleteDataset').addEventListener('click',openDeleteDataset);
+$('#confirmDeleteDataset').addEventListener('click',async()=>{
+  const id=$('#deleteDialog').dataset.id,button=$('#confirmDeleteDataset');button.disabled=true;
+  try{
+    await api('/api/datasets/delete',{dataset:id});$('#deleteDialog').close();
+    if(state.dataset===id){state.dataset='';state.files=[];clearResults();}saveUI();toast('正在删除日志包并释放磁盘空间');
+    const poll=async()=>{
+      try{const all=await refreshDatasets();const item=all.find(d=>d.id===id);
+        if(item?.state==='deleting')setTimeout(poll,1000);
+        else if(item)toast(item.error||'删除失败');
+        else toast('日志包已删除，磁盘空间已清理');
+      }catch(error){toast(error.message);}
+    };await poll();
+  }catch(error){toast(error.message);}
+  finally{button.disabled=false;}
+});
 for(const id of ['settings','aiSettings'])$('#'+id).addEventListener('click',openSettings);
 $$('.nav').forEach(button=>button.addEventListener('click',()=>setView(button.dataset.view)));
 $$('.close').forEach(button=>button.addEventListener('click',()=>button.closest('dialog').close()));
@@ -268,7 +350,11 @@ document.addEventListener('click',async e=>{
   }catch(error){toast(error.message);}
 });
 clearResults();
-refreshDatasets().then(datasets=>{
+refreshDatasets(state.dataset).then(datasets=>{
+  restoreSearchForm(savedUI.search);$('#traceId').value=savedUI.trace||'';
+  $('#aiEndpoint').value=savedUI.aiEndpoint||'';$('#aiQuestion').value=savedUI.aiQuestion||'';
+  $('#fileSearch').value=savedUI.fileSearch||'';
+  setTimeout(()=>setView(savedUI.view||'search'),0);
   if(datasets?.some(d=>d.state==='importing')) {
     const poll=async()=>{try{const all=await refreshDatasets();if(all?.some(d=>d.state==='importing'))setTimeout(poll,1500);}catch(e){toast(e.message);}};
     setTimeout(poll,1500);

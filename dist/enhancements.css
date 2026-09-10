@@ -1,0 +1,42 @@
+.danger-outline {
+  border: 1px solid #58394a;
+  border-radius: 7px;
+  padding: 9px 12px;
+  color: #cf9fac;
+  font-size: .8rem;
+  margin-top: 9px;
+}
+.danger-outline:hover { background: #321f33; color: #f2bec8; }
+.danger-outline:disabled { display: none; }
+.danger-button {
+  border-radius: 7px;
+  padding: 10px 16px;
+  background: #b52d49;
+  color: #fff;
+}
+.danger-button:hover { background: #9d243e; }
+.danger-notice {
+  padding: 16px;
+  border: 1px solid #efc5cd;
+  border-radius: 8px;
+  background: #fff5f6;
+  color: #842b3e;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.input-action { display: flex; align-items: stretch; }
+.input-action input {
+  border-radius: 7px 0 0 7px;
+  font-family: var(--mono);
+  font-size: .8rem;
+}
+.input-action button {
+  border: 1px solid var(--border);
+  border-left: 0;
+  border-radius: 0 7px 7px 0;
+  padding: 0 11px;
+  color: var(--blue);
+  background: #f7faff;
+  font-size: .8rem;
+}
+.advanced-grid label > small { color: #8896aa; line-height: 1.5; }

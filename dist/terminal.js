@@ -6,8 +6,8 @@
   let rules=null, editorBase=0, editorDirty=false, previewText='', lastReportAt=0, starting=false;
   const request=api;
   const draftKey='logscopeAnalysisQuestion';
-  $('#terminalQuestion').value=sessionStorage.getItem(draftKey)||'';
-  $('#terminalQuestion').addEventListener('input',()=>sessionStorage.setItem(draftKey,$('#terminalQuestion').value));
+  $('#terminalQuestion').value=localStorage.getItem(draftKey)||'';
+  $('#terminalQuestion').addEventListener('input',()=>localStorage.setItem(draftKey,$('#terminalQuestion').value));
   function notice(text){$('#terminalNotice').textContent=text;}
   function datasetLabel(){
     $('#analysisDataset').textContent='日志包：'+($('#dataset').selectedOptions[0]?.textContent||'请先导入');
@@ -160,7 +160,7 @@
   $('#terminalCommand').addEventListener('input',launchLabel);$('#terminalLaunchMode').addEventListener('change',launchLabel);
   $('#dataset').addEventListener('change',datasetLabel);
   $$('[data-question]').forEach(button=>button.addEventListener('click',()=>{
-    $('#terminalQuestion').value=button.dataset.question;sessionStorage.setItem(draftKey,button.dataset.question);$('#terminalQuestion').focus();
+    $('#terminalQuestion').value=button.dataset.question;localStorage.setItem(draftKey,button.dataset.question);$('#terminalQuestion').focus();
   }));
   $('#editRules').addEventListener('click',openRules);
   for(const id of ['rulesWorkflow','rulesBusiness','rulesNote'])$('#'+id).addEventListener('input',()=>{editorDirty=true;$('#rulesVersionText').textContent='基于版本 v'+editorBase+' · 未保存';});
