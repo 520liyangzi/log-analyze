@@ -592,7 +592,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.10'
+    server_version = 'LogScope/1.11'
     def log_message(self, fmt, *args):
         pass
     @property

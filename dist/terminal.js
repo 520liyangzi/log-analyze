@@ -3,7 +3,7 @@
 (() => {
   let term, fit, sessionId='', cursor=0, timer, running=false, pollGeneration=0, historyVisible=false;
   let inputQueue='', sending=false, resizeTimer, reportText='', currentInfo=null, available=false;
-  let rules=null, editorBase=0, editorDirty=false, previewText='', previewAction=null, projectSnapshot=null, initialProjectSnapshot=null, lastReportAt=0, starting=false;
+  let rules=null, editorBase=0, editorDirty=false, previewText='', previewAction=null, projectSnapshot=null, initialProjectSnapshot=null, lastReportAt=0, starting=false, resumePending=false;
   const request=api;
   const draftKey='logscopeAnalysisQuestion';
   $('#terminalQuestion').value=localStorage.getItem(draftKey)||'';
@@ -19,6 +19,13 @@
     $('#launchSummary').textContent=command+($('#terminalLaunchMode').value==='argument'?' · 自动读取任务':' · AI 就绪后发送任务');
   }
   function stateLabel(state){return state==='running'?'运行中':state==='stopped'?'已结束':state==='interrupted'?'待恢复':state==='exited'?'已退出':'已保存';}
+  function updateResumeControl(){
+    const button=$('#resumeTerminal');
+    button.disabled=running||resumePending;
+    button.textContent=resumePending?'正在恢复…':'恢复这个对话';
+    button.classList.toggle('is-loading',resumePending);
+    button.title=running?'当前终端仍在运行，无需恢复':(!($('#aiSessionId').value||'').trim()?'尚未填写 Session ID，点击后会提示填写':'');
+  }
   function initialize() {
     if(term)return;
     term=new Terminal({cursorBlink:true,fontFamily:'"Cascadia Mono", Consolas, "SFMono-Regular", monospace',fontSize:14,
@@ -42,12 +49,12 @@
     $('#analysisSessionBar').hidden=false;
     $('#sessionIdentity').hidden=false;
     if(document.activeElement!==$('#aiSessionId'))$('#aiSessionId').value=currentInfo.ai_session_id||'';
-    $('#resumeTerminal').disabled=running||!currentInfo.ai_session_id;
+    updateResumeControl();
     $('#viewTerminalHistory').disabled=running;
     $('#deleteTerminalSession').disabled=running;
     $('#sessionIdentityHint').textContent=currentInfo.ai_session_id
       ? `已保存 Session ID；${running?'当前对话仍在运行':'可按启动设置中的模板恢复对话'}。`
-      : '若终端输出包含 Session ID 会自动识别，也可手动粘贴。';
+      : '尚未保存 Session ID。可以先粘贴到左侧输入框，再直接点击“恢复这个对话”。';
     const updates=currentInfo.rule_updates||[];
     const project=currentInfo.project?` · 代码 ${currentInfo.project.branch} @ ${currentInfo.project.commit.slice(0,12)}`:'';
     $('#sessionTaskSummary').textContent=`本次会话：${currentInfo.name||currentInfo.dataset||''} · 初始规则 v${currentInfo.rules_version||'?'}${updates.length?' · 已准备更新 v'+updates[updates.length-1].version:''}${project} · ${currentInfo.question||'未填写问题'}`;
@@ -327,6 +334,7 @@
     if(!sessionId)return toast('请先选择一个排查任务');
     try{const info=await request('/api/terminal/session-id',{id:sessionId,ai_session_id:$('#aiSessionId').value});currentInfo=info;setStatus(info);await sessions();toast('Session ID 已保存');}catch(e){toast(e.message);}
   });
+  $('#aiSessionId').addEventListener('input',updateResumeControl);
   $('#viewTerminalHistory').addEventListener('click',async()=>{
     if(!sessionId||running)return;
     if(historyVisible){
@@ -348,12 +356,18 @@
   });
   $('#resumeTerminal').addEventListener('click',async()=>{
     if(!sessionId||running)return;
-    $('#resumeTerminal').disabled=true;
+    const aiSessionId=$('#aiSessionId').value.trim();
+    if(!aiSessionId){
+      notice('这个历史任务没有 Session ID。请先粘贴公司 AI 的 Session ID，再点击“恢复这个对话”。');
+      toast('请先填写 AI Session ID');$('#aiSessionId').focus();return;
+    }
+    resumePending=true;updateResumeControl();
     try{
       initialize();fit.fit();await saveSettings();
-      const info=await request('/api/terminal/resume',{id:sessionId,ai_session_id:$('#aiSessionId').value,cols:term.cols,rows:term.rows});
+      const info=await request('/api/terminal/resume',{id:sessionId,ai_session_id:aiSessionId,cols:term.cols,rows:term.rows});
       await connect(info);notice(`已执行恢复命令，Session ID：${info.ai_session_id}。`);
-    }catch(e){notice(e.message);toast(e.message);setStatus(currentInfo);}
+    }catch(e){notice('恢复失败：'+e.message);toast(e.message);setStatus(currentInfo);}
+    finally{resumePending=false;updateResumeControl();}
   });
   $('#deleteTerminalSession').addEventListener('click',async()=>{
     if(!sessionId||running)return;

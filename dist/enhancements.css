@@ -1,3 +1,6 @@
+button:disabled { cursor: not-allowed; }
+button.is-loading:disabled { cursor: wait; }
+
 .danger-outline {
   border: 1px solid #58394a;
   border-radius: 7px;
