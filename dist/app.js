@@ -286,6 +286,7 @@ function openDeleteDataset() {
   const dataset=state.datasets.find(item=>item.id===state.dataset);
   if(!dataset)return toast('请先选择要删除的日志包');
   $('#deleteDialog').dataset.id=dataset.id;
+  $('#compactAfterDelete').checked=false;
   $('#deleteDatasetInfo').textContent=`${dataset.name} · ${number(dataset.records)} 条记录 · 原始 ZIP ${formatBytes(dataset.archive_bytes)}`;
   $('#deleteDialog').showModal();
 }
@@ -341,15 +342,16 @@ for(const id of ['sideCollect','topCollect'])$('#'+id).addEventListener('click',
 for(const id of ['collectPod','collectStart','collectEnd','collectUrl','collectUser','collectHeadless','collectTimeout','collectPoll','collectEncoding','collectOffset','collectUnit'])$('#'+id).addEventListener('input',saveUI);
 $('#deleteDataset').addEventListener('click',openDeleteDataset);
 $('#confirmDeleteDataset').addEventListener('click',async()=>{
-  const id=$('#deleteDialog').dataset.id,button=$('#confirmDeleteDataset');button.disabled=true;
+  const id=$('#deleteDialog').dataset.id,compact=$('#compactAfterDelete').checked,button=$('#confirmDeleteDataset');button.disabled=true;
   try{
-    await api('/api/datasets/delete',{dataset:id});$('#deleteDialog').close();
-    if(state.dataset===id){state.dataset='';state.files=[];clearResults();}saveUI();toast('正在删除日志包并释放磁盘空间');
+    await api('/api/datasets/delete',{dataset:id,compact});$('#deleteDialog').close();
+    if(state.dataset===id){state.dataset='';state.files=[];clearResults();}saveUI();
+    toast(compact?'正在删除并压缩整个数据库，可能需要数分钟':'正在快速删除日志包，空闲空间将供后续导入复用');
     const poll=async()=>{
       try{const all=await refreshDatasets();const item=all.find(d=>d.id===id);
         if(item?.state==='deleting')setTimeout(poll,1000);
         else if(item)toast(item.error||'删除失败');
-        else toast('日志包及索引已删除；data 目录仍保留应用数据库、AI 会话和配置');
+        else toast(compact?'日志包已删除，数据库压缩完成':'日志包及索引已快速删除；数据库空闲页可供后续导入复用');
       }catch(error){toast(error.message);}
     };await poll();
   }catch(error){toast(error.message);}

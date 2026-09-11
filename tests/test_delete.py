@@ -7,7 +7,7 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from app import make_server
+from app import Store, make_server
 from demo import create_demo
 
 
@@ -62,3 +62,23 @@ class DeleteDatasetTests(unittest.TestCase):
                     self.assertEqual(db.execute(f'SELECT count(*) FROM {table} WHERE rowid NOT IN (SELECT id FROM logs)').fetchone()[0], 0)
             server.shutdown();server.server_close();thread.join()
             server.store.pool.shutdown(wait=True)
+
+    def test_restart_finishes_interrupted_deletion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store=Store(Path(temp)/'data')
+            with store.connect() as db:
+                db.execute("INSERT INTO datasets(id,name,state,created) VALUES('stale','old.zip','deleting','2026')")
+            store.pool.shutdown(wait=True)
+            reopened=Store(Path(temp)/'data')
+            try:
+                self.assertFalse(any(row['id']=='stale' for row in reopened.datasets()))
+            finally:
+                reopened.pool.shutdown(wait=True)
+
+    def test_explicit_compaction_delete_still_supported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store=Store(Path(temp)/'data')
+            identifier=store.submit(create_demo(Path(temp)/'compact.zip'),'compact.zip')
+            store.pool.shutdown(wait=True)
+            store.delete_dataset(identifier, compact=True)
+            self.assertFalse(any(row['id']==identifier for row in store.datasets()))

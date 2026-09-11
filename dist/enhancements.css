@@ -41,6 +41,9 @@ button.is-loading:disabled { cursor: wait; }
   line-height: 1.7;
   overflow-wrap: anywhere;
 }
+.delete-option { margin: 0 24px; padding: 14px 16px; border: 1px solid #e1e7f0; border-radius: 8px; background: #f8faff; }
+.delete-option .checkbox { color: #40516d; font-size: .875rem; }
+.delete-option small { display: block; margin: 7px 0 0 24px; color: #7d899c; line-height: 1.6; }
 .input-action { display: flex; align-items: stretch; }
 .input-action input {
   border-radius: 7px 0 0 7px;

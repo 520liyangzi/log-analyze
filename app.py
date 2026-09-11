@@ -161,6 +161,19 @@ class Store:
             db.execute('CREATE INDEX IF NOT EXISTS logs_route ON logs(dataset,route_id)')
             db.execute('CREATE INDEX IF NOT EXISTS logs_request_id ON logs(dataset,request_id)')
             db.execute("UPDATE datasets SET state='failed', error='上次导入被中断，请重新上传' WHERE state='importing'")
+            # A previous version could be stopped during VACUUM after the rows
+            # and archive were already removed. Finish that deletion on restart;
+            # otherwise return the package to a retryable state.
+            for stale in db.execute("SELECT id FROM datasets WHERE state='deleting'").fetchall():
+                identifier = stale['id']
+                has_rows = db.execute('SELECT 1 FROM logs WHERE dataset=? LIMIT 1', (identifier,)).fetchone()
+                has_files = db.execute('SELECT 1 FROM files WHERE dataset=? LIMIT 1', (identifier,)).fetchone()
+                archive = self.directory / 'archives' / (identifier + '.zip')
+                if not has_rows and not has_files and not archive.exists():
+                    db.execute('DELETE FROM datasets WHERE id=?', (identifier,))
+                else:
+                    db.execute("UPDATE datasets SET state='ready',error='上次删除被中断，请重新删除' WHERE id=?",
+                               (identifier,))
         self.fts_tables = []
         with self.connect() as db:
             # Keep the old content-copying FTS table readable, but use an
@@ -421,7 +434,7 @@ class Store:
             row['archive_bytes'] = archive.stat().st_size if archive.exists() else 0
         return rows
 
-    def request_delete(self, identifier):
+    def request_delete(self, identifier, compact=False):
         with self.connect() as db:
             row = db.execute('SELECT state FROM datasets WHERE id=?', (identifier,)).fetchone()
             if not row:
@@ -430,10 +443,11 @@ class Store:
                 raise ValueError('日志包正在导入，完成后再删除')
             if row['state'] == 'deleting':
                 return
-            db.execute("UPDATE datasets SET state='deleting',error='' WHERE id=?", (identifier,))
-        self.pool.submit(self.delete_dataset, identifier, row['state'])
+            db.execute("UPDATE datasets SET state='deleting',error=? WHERE id=?",
+                       ('compact' if compact else '', identifier))
+        self.pool.submit(self.delete_dataset, identifier, row['state'], compact)
 
-    def delete_dataset(self, identifier, previous_state='ready'):
+    def delete_dataset(self, identifier, previous_state='ready', compact=False):
         try:
             with self.connect() as db:
                 row = db.execute('SELECT index_version FROM datasets WHERE id=?', (identifier,)).fetchone()
@@ -444,14 +458,13 @@ class Store:
                 db.execute('DELETE FROM logs WHERE dataset=?', (identifier,))
                 db.execute('DELETE FROM files WHERE dataset=?', (identifier,))
             (self.directory / 'archives' / (identifier + '.zip')).unlink(missing_ok=True)
-            # Return free pages to the operating system after large packages. If
-            # compaction lacks temporary disk space, the pages remain reusable.
-            try:
+            # Fast deletion keeps free database pages for later imports. VACUUM
+            # rewrites the entire database and is therefore explicitly opt-in.
+            with self.connect() as db:
+                db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            if compact:
                 with self.connect() as db:
-                    db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
                     db.execute('VACUUM')
-            except sqlite3.Error:
-                pass
             with self.connect() as db:
                 db.execute('DELETE FROM datasets WHERE id=?', (identifier,))
         except Exception as exc:
@@ -680,7 +693,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.16'
+    server_version = 'LogScope/1.17'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -841,7 +854,7 @@ class Handler(BaseHTTPRequestHandler):
                     identifier = str(body.get('dataset', ''))
                     if self.server.terminals.dataset_in_use(identifier):
                         raise ValueError('该日志包正在被 AI 终端使用，请先结束对应终端')
-                    self.store.request_delete(identifier)
+                    self.store.request_delete(identifier, body.get('compact') is True)
                     self.json({'ok': True, 'id': identifier}, 202)
                 elif parsed.path == '/api/terminal/input':
                     self.server.terminals.get(body['id']).write(body.get('data', ''))
