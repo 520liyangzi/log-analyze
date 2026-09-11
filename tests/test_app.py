@@ -155,6 +155,9 @@ class FailureTests(unittest.TestCase):
                     self.assertIn('LogScope',home)
                     self.assertIn('在线采集日志',home)
                     self.assertNotIn('API 问诊',home)
+                    self.assertLess(home.index('id="collectUrl"'), home.index('<details class="collect-advanced"'))
+                    for field in ('collectUrl','collectUser','collectPassword'):
+                        self.assertRegex(home, rf'id="{field}"[^>]*\brequired\b')
                     self.assertIn("default-src 'self'",response.headers['Content-Security-Policy'])
                 with self.assertRaises(HTTPError) as error:
                     urlopen(Request(base+'/api/datasets',headers={'Origin':'https://evil.invalid'}))
@@ -193,8 +196,16 @@ print('download complete password=' + str(a.password),flush=True)
                 with urlopen(request,timeout=20) as response:return json.load(response)
             try:
                 self.assertTrue(api('/api/collector/capability')['available'])
+                for missing in ('url','user','password'):
+                    body=dict(pod='order',start='2026-09-10 14:00:00',end='2026-09-10 16:30:00',
+                              url='https://logs.example.test',user='admin',password='test secret')
+                    body[missing]=''
+                    with self.assertRaises(HTTPError) as error:
+                        api('/api/collector/start',body)
+                    self.assertEqual(error.exception.code,400)
                 job=api('/api/collector/start',dict(pod='order;touch hacked',start='2026-09-10 14:00:00',
-                                                     end='2026-09-10 16:30:00',password='test secret'))
+                                                     end='2026-09-10 16:30:00',url='https://logs.example.test',
+                                                     user='admin',password='test secret'))
                 deadline=time.monotonic()+15
                 while time.monotonic()<deadline:
                     job=api('/api/collector/status?id='+job['id'])
@@ -208,6 +219,8 @@ print('download complete password=' + str(a.password),flush=True)
                 received=json.loads((root/'received.json').read_text('utf-8'))
                 self.assertEqual(received['pod'],'order;touch hacked')
                 self.assertEqual(received['start'],'2026-09-10 14:00:00')
+                self.assertEqual(received['url'],'https://logs.example.test')
+                self.assertEqual(received['user'],'admin')
                 self.assertFalse((root/'hacked').exists())
             finally:
                 server.shutdown();server.server_close();thread.join();server.store.pool.shutdown(wait=True)

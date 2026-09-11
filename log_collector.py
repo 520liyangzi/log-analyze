@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 import zipfile
+from urllib.parse import urlsplit
 
 
 class LogCollector:
@@ -50,6 +51,16 @@ class LogCollector:
         start, end = self._time(start_text, '开始时间'), self._time(end_text, '结束时间')
         if start >= end:
             raise ValueError('结束时间必须晚于开始时间')
+        options = {key: str(body.get(key, '')).strip() for key in ('url', 'user', 'password', 'headless')}
+        for key, label, maximum in (('url', '平台地址', 2000), ('user', '用户名', 500),
+                                    ('password', '密码', 2000)):
+            if not options[key]:
+                raise ValueError(f'请填写{label}')
+            if len(options[key]) > maximum:
+                raise ValueError(f'{label}内容过长')
+        parsed_url = urlsplit(options['url'])
+        if parsed_url.scheme not in ('http', 'https') or not parsed_url.netloc:
+            raise ValueError('平台地址应为完整的 http:// 或 https:// 地址')
         timeout = int(body.get('timeout') or 300)
         poll = int(body.get('poll') or 5)
         if not 10 <= timeout <= 7200:
@@ -64,7 +75,6 @@ class LogCollector:
                        created=dt.datetime.now(dt.timezone.utc).isoformat(), message='正在启动采集脚本…',
                        dataset_id='', output='')
             self.jobs[identifier] = job
-        options = {key: str(body.get(key, '')).strip() for key in ('url', 'user', 'password', 'headless')}
         options.update(timeout=timeout, poll=poll, encoding=str(body.get('encoding', 'auto')),
                        offset=str(body.get('offset', '+0800')), unit=str(body.get('unit', 'ms')))
         self.pool.submit(self._run, identifier, job.copy(), options)
