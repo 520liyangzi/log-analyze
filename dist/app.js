@@ -349,7 +349,7 @@ $('#confirmDeleteDataset').addEventListener('click',async()=>{
       try{const all=await refreshDatasets();const item=all.find(d=>d.id===id);
         if(item?.state==='deleting')setTimeout(poll,1000);
         else if(item)toast(item.error||'删除失败');
-        else toast('日志包已删除，磁盘空间已清理');
+        else toast('日志包及索引已删除；data 目录仍保留应用数据库、AI 会话和配置');
       }catch(error){toast(error.message);}
     };await poll();
   }catch(error){toast(error.message);}

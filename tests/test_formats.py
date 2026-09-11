@@ -105,6 +105,9 @@ class FormatTests(unittest.TestCase):
                 self.assertNotIn('log_fts_v2_content',tables)
                 for keyword in ('100%', 'x_y', '中文接口'):
                     self.assertEqual(store.search({'dataset':dataset,'q':keyword})['summary']['total'],1)
+                where,_=store.query_parts({'dataset':dataset,'q':'中文接口'})
+                self.assertIn('log_fts_v2 MATCH',where)
+                self.assertNotIn(' LIKE ',where)
                 self.assertEqual(store.datasets()[0]['index_version'],2)
             finally:
                 store.pool.shutdown(wait=True)
@@ -122,11 +125,17 @@ class FormatTests(unittest.TestCase):
             try:
                 self.assertEqual(reopened.search({'dataset':'legacy','q':'legacy-only-marker'})['summary']['total'],1)
                 self.assertTrue(any('旧版全文索引' in w for w in reopened.datasets()[0]['warnings']))
+                where,_=reopened.query_parts({'dataset':'legacy','q':'legacy-only-marker'})
+                self.assertIn('log_fts MATCH',where)
+                self.assertNotIn('log_fts_v2',where)
                 archive=Path(tmp)/'new.zip'
                 with zipfile.ZipFile(archive,'w') as outer:
                     outer.writestr('ns_pod/svc/pod-svc/log/root.log',
                                    '[2026-09-08 09:00:00.000 +0800] [2] [2] [INFO] [worker] compact-only-marker\n')
                 current=reopened.submit(archive,'new.zip');reopened.pool.shutdown(wait=True)
+                self.assertEqual(reopened.search({'dataset':current,'q':'compact-only-marker'})['summary']['total'],1)
+                reopened.delete_dataset('legacy')
+                self.assertFalse(any(row['id']=='legacy' for row in reopened.datasets()))
                 self.assertEqual(reopened.search({'dataset':current,'q':'compact-only-marker'})['summary']['total'],1)
             finally:
                 reopened.pool.shutdown(wait=True)

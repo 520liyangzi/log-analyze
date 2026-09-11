@@ -178,6 +178,24 @@ class Store:
         self.write_fts = 'log_fts_v2' if 'log_fts_v2' in self.fts_tables else (
             'log_fts' if 'log_fts' in self.fts_tables else '')
 
+    def fts_table(self, index_version):
+        """Return only the FTS generation that actually contains this dataset."""
+        preferred = 'log_fts_v2' if int(index_version or 1) >= INDEX_VERSION else 'log_fts'
+        return preferred if preferred in self.fts_tables else ''
+
+    @staticmethod
+    def compact_fts_query(value, maximum=8):
+        """Build a selective detail=none query without losing literal matches."""
+        windows = [value[index:index + 3] for index in range(len(value) - 2)]
+        if len(windows) > maximum:
+            positions = sorted({round(index * (len(windows) - 1) / (maximum - 1))
+                                for index in range(maximum)})
+            windows = [windows[index] for index in positions]
+        # Every exact substring contains every selected trigram. instr() still
+        # verifies the full literal after FTS narrows the candidates.
+        return ' AND '.join('"' + window.replace('"', '""') + '"'
+                            for window in dict.fromkeys(windows))
+
     @contextlib.contextmanager
     def connect(self):
         db = sqlite3.connect(self.database, timeout=60)
@@ -376,7 +394,9 @@ class Store:
             with self.connect() as db:
                 # Batches are committed during import to cap WAL size, so remove
                 # any partial rows before exposing the failed dataset.
-                for table in self.fts_tables:
+                row = db.execute('SELECT index_version FROM datasets WHERE id=?', (identifier,)).fetchone()
+                table = self.fts_table(row['index_version']) if row else ''
+                if table:
                     db.execute(f'DELETE FROM {table} WHERE rowid IN '
                                '(SELECT id FROM logs WHERE dataset=?)', (identifier,))
                 db.execute('DELETE FROM logs WHERE dataset=?', (identifier,))
@@ -416,7 +436,9 @@ class Store:
     def delete_dataset(self, identifier, previous_state='ready'):
         try:
             with self.connect() as db:
-                for table in self.fts_tables:
+                row = db.execute('SELECT index_version FROM datasets WHERE id=?', (identifier,)).fetchone()
+                table = self.fts_table(row['index_version']) if row else ''
+                if table:
                     db.execute(f'DELETE FROM {table} WHERE rowid IN '
                                '(SELECT id FROM logs WHERE dataset=?)', (identifier,))
                 db.execute('DELETE FROM logs WHERE dataset=?', (identifier,))
@@ -519,21 +541,14 @@ class Store:
             raise ValueError('搜索词最多 2000 个字符')
         if keyword:
             if self.fts and params.get('scan') != '1' and len(keyword) >= 3 and '\n' not in keyword:
-                phrase = '"' + keyword.replace('"', '""') + '"'
-                searches, search_args = [], []
-                for table in self.fts_tables:
-                    if table == 'log_fts_v2':
-                        # Trigram-backed LIKE keeps literal %, _ and punctuation
-                        # searches exact while detail=none avoids position lists.
-                        pattern = ('%' + keyword.replace('\\', '\\\\')
-                                   .replace('%', '\\%').replace('_', '\\_') + '%')
-                        searches.append("SELECT rowid FROM log_fts_v2 WHERE raw LIKE ? ESCAPE '\\'")
-                        search_args.append(pattern)
-                    else:
-                        searches.append(f'SELECT rowid FROM {table} WHERE {table} MATCH ?')
-                        search_args.append(phrase)
-                clauses.append('l.id IN (' + ' UNION '.join(searches) + ')')
-                args.extend(search_args)
+                with self.connect() as db:
+                    row = db.execute('SELECT index_version FROM datasets WHERE id=?', (identifier,)).fetchone()
+                table = self.fts_table(row['index_version']) if row else ''
+                if table:
+                    query = (self.compact_fts_query(keyword) if table == 'log_fts_v2'
+                             else '"' + keyword.replace('"', '""') + '"')
+                    clauses.append(f'l.id IN (SELECT rowid FROM {table} WHERE {table} MATCH ?)')
+                    args.append(query)
             clauses.append('instr(l.raw,?)>0' if params.get('case') == '1' else 'instr(lower(l.raw),lower(?))>0')
             args.append(keyword)
         return ' AND '.join(clauses), args
@@ -665,7 +680,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.15'
+    server_version = 'LogScope/1.16'
     def log_message(self, fmt, *args):
         pass
     @property
