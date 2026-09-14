@@ -8,18 +8,22 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import runpy
 import shutil
 import sqlite3
+import sys
 import tempfile
+import threading
 import time
 import uuid
+import webbrowser
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 from log_collector import LogCollector
+from runtime_paths import APP_ROOT, FROZEN, RESOURCE_ROOT
 from terminal_bridge import TerminalManager, dimensions
 
-BASE = Path(__file__).resolve().parent
 STAMP = re.compile(r'^\[?((?:\d{4}-\d\d-\d\d|\d{8})[ T]\d\d:\d\d:\d\d(?:[.,]\d{1,6})?)(?:\s*([+-]\d{4}))?')
 ROOT = re.compile(r'^\[[^\]]+\]\s*\[([^\]]*)\]\s*\[([^\]]*)\]\s*\[(TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\]\s*\[([^\]]*)\]')
 ACCESS = re.compile(r'"(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|CONNECT|TRACE)\s+(.*?)\s+HTTP/[\d.]+"\s+(\d{3})\s+(.*)')
@@ -693,7 +697,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.17'
+    server_version = 'LogScope/1.18'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -783,7 +787,7 @@ class Handler(BaseHTTPRequestHandler):
                           '/vendor/addon-fit.js': 'vendor/addon-fit.js'}
                 if parsed.path not in routes:
                     return self.json({'error': '不存在'}, 404)
-                file = BASE / 'dist' / routes[parsed.path]
+                file = RESOURCE_ROOT / 'dist' / routes[parsed.path]
                 raw = file.read_bytes()
                 self.send_response(200)
                 self.send_header('Content-Type', {'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8'}[file.suffix])
@@ -896,18 +900,35 @@ def make_server(directory, port=8765, collect_script=None):
     port = server.server_address[1]
     server.allowed_hosts = {f'127.0.0.1:{port}', f'localhost:{port}'}
     server.terminals = TerminalManager(server.store, f'http://127.0.0.1:{port}')
-    server.collector = LogCollector(server.store, collect_script or BASE / 'collect_logs.py')
+    server.collector = LogCollector(server.store, collect_script or APP_ROOT / 'collect_logs.py')
     return server
 
 
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == '--run-tool':
+        tools = {
+            'logscope': RESOURCE_ROOT / 'skills/logscope/scripts/logscope.py',
+            'project': RESOURCE_ROOT / 'skills/logscope/scripts/project.py',
+        }
+        tool = tools.get(sys.argv[2])
+        if tool is None:
+            raise SystemExit('未知内置工具，只支持 logscope 或 project')
+        sys.argv = [str(tool), *sys.argv[3:]]
+        runpy.run_path(str(tool), run_name='__main__')
+        return
     parser = argparse.ArgumentParser(description='LogScope 本地日志分析')
     parser.add_argument('--port', type=int, default=8765)
-    parser.add_argument('--data', default=str(BASE / 'data'))
+    parser.add_argument('--data', default=str(APP_ROOT / 'data'))
+    parser.add_argument('--no-browser', action='store_true', help='启动后不自动打开浏览器')
     args = parser.parse_args()
     server = make_server(args.data, args.port)
-    print(f'LogScope 已启动：http://127.0.0.1:{server.server_address[1]}', flush=True)
+    url = f'http://127.0.0.1:{server.server_address[1]}'
+    print(f'LogScope 已启动：{url}', flush=True)
     print('日志只存储在本机。按 Ctrl+C 停止。', flush=True)
+    if FROZEN and not args.no_browser:
+        opener = threading.Timer(0.8, webbrowser.open, args=(url,))
+        opener.daemon = True
+        opener.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -13,6 +13,7 @@ import time
 import uuid
 import zipfile
 from urllib.parse import urlsplit
+from runtime_paths import FROZEN
 
 
 class LogCollector:
@@ -33,12 +34,31 @@ class LogCollector:
         except ValueError:
             raise ValueError(f'{label}格式应为 YYYY-MM-DD HH:MM:SS') from None
 
+    @staticmethod
+    def python_command():
+        if not FROZEN:
+            return [sys.executable]
+        configured = os.getenv('LOGSCOPE_COLLECT_PYTHON', '').strip()
+        if configured and Path(configured).is_file():
+            return [configured]
+        executable = shutil.which('python') or shutil.which('python3')
+        if executable:
+            return [executable]
+        launcher = shutil.which('py')
+        return [launcher, '-3'] if launcher else []
+
     def capability(self):
-        return {'available': self.script.is_file(), 'script': self.script.name,
-                'reason': '' if self.script.is_file() else f'未找到 {self.script.name}，请把脚本放到 app.py 同级目录'}
+        available = self.script.is_file() and bool(self.python_command())
+        if not self.script.is_file():
+            reason = f'未找到 {self.script.name}，请把脚本放到 LogScope.exe 或 app.py 同级目录'
+        elif not self.python_command():
+            reason = '在线采集脚本需要系统 Python；请安装 Python，或用 LOGSCOPE_COLLECT_PYTHON 指定 python.exe'
+        else:
+            reason = ''
+        return {'available': available, 'script': self.script.name, 'reason': reason}
 
     def start(self, body):
-        if not self.script.is_file():
+        if not self.capability()['available']:
             raise ValueError(self.capability()['reason'])
         with self.lock:
             existing = list(self.jobs)
@@ -97,7 +117,7 @@ class LogCollector:
         output_dir.mkdir()
         staged = self.store.directory / (identifier + '.collect.upload')
         password = options.get('password', '')
-        command = [sys.executable, str(self.script), '--pod', job['pod'], '--start', job['start'],
+        command = [*self.python_command(), str(self.script), '--pod', job['pod'], '--start', job['start'],
                    '--end', job['end'], '--output', str(output_dir)]
         for key in ('url', 'user', 'password', 'headless'):
             if options[key]:

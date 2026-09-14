@@ -15,11 +15,18 @@ import time
 import uuid
 from analysis_rules import AnalysisRules, atomic_json, render_code_task, render_rules, render_task
 from project_access import inspect_repository, select_revision
+from runtime_paths import FROZEN, RESOURCE_ROOT, SOURCE_ROOT
 
-BASE = Path(__file__).resolve().parent
 TASK_PROMPT = 'Read task.md in the current directory. Use its rules and query tools to investigate the question. Reply in Chinese and write report.md.'
 DEFAULT_RESUME_TEMPLATE = '{command} --sessions {session_id}'
 SESSION_ID_RE = re.compile(r'(?i)(?:\bsessions?(?:\s*id)?|--sessions?|--resume)\s*[:=]?\s*([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\b')
+
+
+def bundled_tool_command(name):
+    executable = subprocess.list2cmdline([sys.executable])
+    if FROZEN:
+        return f'{executable} --run-tool {name}'
+    return f'{executable} tools/{name}.py'
 
 
 def dimensions(cols, rows):
@@ -38,7 +45,7 @@ class UnixPTY:
             self.resize(cols, rows)
             # A separate executable claims the controlling terminal; no Python preexec_fn
             # runs after fork in the multithreaded HTTP process.
-            self.proc = subprocess.Popen([sys.executable, str(BASE / 'terminal_child.py'), shell],
+            self.proc = subprocess.Popen([sys.executable, str(SOURCE_ROOT / 'terminal_child.py'), shell],
                                          stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env,
                                          start_new_session=True, close_fds=True)
         except BaseException:
@@ -358,6 +365,8 @@ class TerminalManager:
                 endpoints.append(value)
         trace_ids = list(dict.fromkeys(re.findall(r'(?<!\d)\d{15,}(?!\d)', question)))
         task = dict(dataset=dataset, name=name, url=self.url, question=question, python=sys.executable,
+                    logscope_command=bundled_tool_command('logscope'),
+                    project_command=bundled_tool_command('project'),
                     rules_version=rules['version'], scope=self.store.dataset_scope(dataset),
                     query_hints={'endpoints': endpoints[:20], 'trace_ids': trace_ids[:20]})
         project_path = str(body.get('project_path', '')).strip()
@@ -391,10 +400,10 @@ class TerminalManager:
             directory = self.directory / identifier
             directory.mkdir()
             skill = directory / '.claude' / 'skills' / 'logscope'
-            shutil.copytree(BASE / 'skills' / 'logscope', skill, ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+            shutil.copytree(RESOURCE_ROOT / 'skills' / 'logscope', skill, ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
             (directory / 'tools').mkdir()
-            shutil.copyfile(BASE / 'skills/logscope/scripts/logscope.py', directory / 'tools/logscope.py')
-            shutil.copyfile(BASE / 'skills/logscope/scripts/project.py', directory / 'tools/project.py')
+            shutil.copyfile(RESOURCE_ROOT / 'skills/logscope/scripts/logscope.py', directory / 'tools/logscope.py')
+            shutil.copyfile(RESOURCE_ROOT / 'skills/logscope/scripts/project.py', directory / 'tools/project.py')
             atomic_json(directory / 'rules.json', rules)
             (directory / 'task.json').write_text(json.dumps(task, ensure_ascii=False, indent=2), 'utf-8')
             (directory / 'task.md').write_text(task_text, 'utf-8')
@@ -521,7 +530,8 @@ class TerminalManager:
                 raise ValueError('所选分支在预览后发生了变化，请重新生成任务预览')
             task = dict(project_root=repository['root'], branch=repository['branch'], commit=repository['commit'],
                         question=session.task.get('question', ''), log_report='report.md',
-                        log_dataset=session.task.get('name', ''), read_only=True)
+                        log_dataset=session.task.get('name', ''), read_only=True,
+                        project_command=bundled_tool_command('project'))
             return session, task, render_code_task(task)
 
     def preview_code(self, body):

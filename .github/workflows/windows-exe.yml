@@ -1,0 +1,81 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-exe-latest
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller==6.16.0
+      - name: Test source
+        run: python -m unittest discover -s tests -v
+      - name: Build one-file executable
+        shell: pwsh
+        run: ./build_exe.ps1 -SkipInstall
+      - name: Smoke-test packaged executable
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP 'logscope-smoke-data'
+          $process = Start-Process .\release\LogScope.exe -ArgumentList '--port', '8877', '--data', $data, '--no-browser' -PassThru
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              Start-Sleep -Seconds 1
+              try {
+                $response = Invoke-WebRequest 'http://127.0.0.1:8877/' -UseBasicParsing
+                if ($response.StatusCode -eq 200 -and $response.Content -match 'LogScope') {
+                  $ready = $true
+                  break
+                }
+              } catch {}
+              if ($process.HasExited) { throw "LogScope.exe exited with code $($process.ExitCode)" }
+            }
+            if (-not $ready) { throw 'LogScope.exe did not become ready within 30 seconds' }
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+      - name: Create checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash .\release\LogScope.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  LogScope.exe" | Set-Content -Encoding ascii .\release\LogScope.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LogScope-Windows-${{ github.sha }}
+          path: |
+            release/LogScope.exe
+            release/LogScope.exe.sha256
+          if-no-files-found: error
+      - name: Publish rolling latest release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag -f windows-latest $env:GITHUB_SHA
+          git push origin refs/tags/windows-latest --force
+          $notes = "Windows 单文件版，由 main 分支自动构建并启动验证。对应提交：$env:GITHUB_SHA"
+          gh release view windows-latest *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload windows-latest .\release\LogScope.exe .\release\LogScope.exe.sha256 --clobber
+            gh release edit windows-latest --title 'LogScope Windows 最新版' --notes $notes
+          } else {
+            gh release create windows-latest .\release\LogScope.exe .\release\LogScope.exe.sha256 --title 'LogScope Windows 最新版' --notes $notes --target $env:GITHUB_SHA
+          }

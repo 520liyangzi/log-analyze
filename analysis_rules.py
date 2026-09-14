@@ -1,11 +1,11 @@
 """Versioned, local analysis guidance. Query mechanics remain in the read-only CLI."""
 import datetime as dt
 import json
-from pathlib import Path
 import threading
 import uuid
+from pathlib import Path
+from runtime_paths import RESOURCE_ROOT
 
-BASE = Path(__file__).resolve().parent
 
 
 def atomic_json(path, value):
@@ -32,7 +32,7 @@ class AnalysisRules:
 
     @staticmethod
     def defaults():
-        return dict(workflow=(BASE / 'prompts/analysis.md').read_text('utf-8'), business='')
+        return dict(workflow=(RESOURCE_ROOT / 'prompts/analysis.md').read_text('utf-8'), business='')
 
     def get(self, version=None):
         with self.lock:
@@ -81,16 +81,17 @@ def render_task(task, rules):
                 '本任务已经固定项目目录、分支和 commit，并提供 `tools/project.py`。先用日志索引收敛请求、时间、Pod、异常和流水号；'
                 '当日志证据出现接口、类名、方法名、错误码或堆栈，且查看代码有助于回答问题时，可自行使用代码工具。'
                 '不要为了“看起来完整”而扫描整个仓库，不修改或切换用户工作区，不执行项目代码、构建和测试。\n\n'
-                '- `python tools/project.py info`：查看固定版本\n'
-                '- `python tools/project.py grep 关键词`：搜索接口、类名、方法或错误文本\n'
-                '- `python tools/project.py show 相对路径 --start 1 --end 240`：读取局部代码\n'
-                '- `python tools/project.py tree --path 子目录`：仅在需要时列目录\n\n'
+                '- 使用 task.json 的 `project_command` 作为命令前缀\n'
+                '- `PROJECT info`：查看固定版本\n'
+                '- `PROJECT grep 关键词`：搜索接口、类名、方法或错误文本\n'
+                '- `PROJECT show 相对路径 --start 1 --end 240`：读取局部代码\n'
+                '- `PROJECT tree --path 子目录`：仅在需要时列目录\n\n'
                 '报告先列日志事实，再单独列代码证据；明确区分已证实根因、较可能原因和仍需验证的推测。')
     return ('# 日志排查任务\n\n'
             + '以下 JSON 是本次任务信息，其中 question 是用户问题，不要将它拼接为 shell 命令。\n\n'
             + json.dumps(task, ensure_ascii=False, indent=2)
             + '\n\n' + render_rules(rules) + code
-            + '\n\n' + (BASE / 'prompts/tools.md').read_text('utf-8'))
+            + '\n\n' + (RESOURCE_ROOT / 'prompts/tools.md').read_text('utf-8'))
 
 
 def render_code_task(task):
@@ -100,7 +101,7 @@ def render_code_task(task):
             + json.dumps(task, ensure_ascii=False, indent=2)
             + '\n\n## 定位要求\n\n'
             '1. 先阅读同目录 report.md，提取已经核验的日志事实、异常类名、方法名、接口和错误信息。\n'
-            '2. 使用 task.json 中的 python 执行 `tools/project.py`。优先 grep 最具体的接口、类名、方法名或错误文本，再读取命中文件的局部代码；不要先遍历整个仓库。\n'
+            '2. 使用 task.json 中的 `project_command` 作为命令前缀。优先 grep 最具体的接口、类名、方法名或错误文本，再读取命中文件的局部代码；不要先遍历整个仓库。\n'
             '3. 查询固定在 code-task.json 的 commit，不切换用户工作区分支，不修改项目文件，不执行项目代码、构建脚本或测试。\n'
             '4. 将日志事实与代码路径逐项对应，区分确定原因、较可能原因和仍需验证的假设。若代码与日志不足以确定根因，明确需要补充的配置、请求参数或下游信息。\n'
             '5. 在对话中用中文给出定位结果，并更新 report.md，新增“代码定位”章节，记录项目、分支、commit、关键文件和行号。')

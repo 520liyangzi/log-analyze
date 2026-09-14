@@ -16,3 +16,6 @@ __pycache__/
 .idea/
 .DS_Store
 collect_logs.py
+build/
+release/
+*.exe
