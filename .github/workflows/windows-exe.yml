@@ -3,6 +3,8 @@ name: Build Windows EXE
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - LogScope.exe
   workflow_dispatch:
 
 permissions:
@@ -79,3 +81,18 @@ jobs:
           } else {
             gh release create windows-latest .\release\LogScope.exe .\release\LogScope.exe.sha256 --title 'LogScope Windows 最新版' --notes $notes --target $env:GITHUB_SHA
           }
+      - name: Commit executable to repository
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          Copy-Item .\release\LogScope.exe .\LogScope.exe -Force
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f LogScope.exe
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host '仓库中的 LogScope.exe 已是最新版本'
+            exit 0
+          }
+          git commit -m 'build: update LogScope.exe [skip ci]'
+          git push origin HEAD:main

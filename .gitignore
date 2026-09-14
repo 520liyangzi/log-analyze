@@ -19,3 +19,4 @@ collect_logs.py
 build/
 release/
 *.exe
+!LogScope.exe

@@ -8,13 +8,13 @@
 
 ### 推荐：直接使用 EXE
 
-从 [Windows 最新版发布页](https://github.com/520liyangzi/log-analyze/releases/tag/windows-latest) 下载 `LogScope.exe`，放到一个固定目录后双击。程序会自动打开浏览器；日志索引、原始 ZIP、规则和 AI 会话保存在 EXE 同目录的 `data/`，以后只替换 EXE 不会覆盖这些数据。
+执行 `git pull` 后可以直接使用仓库根目录的 `LogScope.exe`；也可以从 [Windows 最新版发布页](https://github.com/520liyangzi/log-analyze/releases/tag/windows-latest) 单独下载。把它放到固定目录后双击，程序会自动打开浏览器；日志索引、原始 ZIP、规则和 AI 会话保存在 EXE 同目录的 `data/`，以后只替换 EXE 不会覆盖这些数据。
 
 `LogScope.exe` 已内置网页、提示词、日志查询和代码查询工具，搜索及 AI 排查不需要另装 Python。首次启动可能被 Windows SmartScreen 提示，因为当前 EXE 没有商业代码签名；可以用发布页同时提供的 `LogScope.exe.sha256` 核对文件。
 
 在线采集是一个例外：`collect_logs.py` 是你的私有外部脚本，且它依赖什么第三方包目前无法从仓库得知，因此使用在线采集时仍需把脚本放在 EXE 同目录，并保留它原本可用的 Python 与依赖环境。上传 ZIP、搜索、流水号、删除日志包和 AI 排查不受此限制。
 
-每次 `main` 分支更新后，GitHub 会在 Windows 上自动测试源码、构建单文件 EXE、真正启动并访问首页，全部通过后覆盖发布页里的最新版。每个构建也会作为该次工作流的 Artifact 保留。
+每次 `main` 分支更新后，GitHub 会在 Windows 上自动测试源码、构建单文件 EXE、真正启动并访问首页，全部通过后覆盖发布页里的最新版，并把成品同步到仓库根目录。每个构建也会作为该次工作流的 Artifact 保留。
 
 ### 使用源码
 
