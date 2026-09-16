@@ -48,6 +48,8 @@ async function maintenanceRegression(browser, sourcePage) {
     assert.equal(await page.locator('#collectPod').inputValue(), draft.collector.pod);
     assert(!(await page.locator('body').innerText()).includes('无法连接本地服务'));
     assert((await page.locator('#retentionProgress').innerText()).includes('2'));
+    assert.equal(await page.locator('#retentionCancel').isEnabled(),true);
+    assert.equal(await page.locator('#retentionCancel').evaluate(element => getComputedStyle(element).color),'rgb(23, 35, 59)');
     await page.screenshot({path:'test-results/retention-maintenance.png',fullPage:true});
     await page.locator('[data-view="search"]').click();
     await page.locator('#query').fill('draft-edited-during-maintenance');
