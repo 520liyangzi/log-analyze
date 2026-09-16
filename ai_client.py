@@ -176,7 +176,11 @@ class ModelClient:
                 # getresponse() may detach/close the original socket when the
                 # server uses Connection: close. Keep a separate handle so a
                 # Windows shutdown still interrupts the reader immediately.
-                self.socket = connection.sock.dup() if connection.sock else None
+                original = connection.sock
+                # SSLSocket.dup() is intentionally unsupported. Duplicate only
+                # the raw transport handle for shutdown, never for TLS reads.
+                self.socket = (socket.socket(original.family, original.type, original.proto,
+                                             fileno=socket.dup(original.fileno())) if original else None)
             if self.stop.is_set():
                 raise Cancelled()
             response = connection.getresponse()

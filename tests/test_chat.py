@@ -1,6 +1,8 @@
 import copy
 import json
 import sqlite3
+import shutil
+import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
@@ -33,7 +35,7 @@ def response(text='', calls=None):
 
 
 class FakeModel:
-    def __init__(self):
+    def __init__(self, tls_context=None):
         self.requests = []
         self.replies = []
         self.gate = threading.Event()
@@ -98,9 +100,11 @@ class FakeModel:
                     pass
 
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        if tls_context:
+            self.server.socket = tls_context.wrap_socket(self.server.socket, server_side=True)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        self.url = 'http://127.0.0.1:' + str(self.server.server_port) + '/v1'
+        self.url = ('https' if tls_context else 'http') + '://127.0.0.1:' + str(self.server.server_port) + '/v1'
 
     def close(self):
         self.gate.set()
@@ -302,6 +306,27 @@ class NativeChatTests(unittest.TestCase):
             db.execute('SELECT 1')
         with self.assertRaises(sqlite3.ProgrammingError):
             db.execute('SELECT 1')
+
+    @unittest.skipUnless(shutil.which('openssl'), 'TLS fixture needs openssl')
+    def test_https_model_with_verified_local_certificate(self):
+        certificate, key = self.root / 'test-cert.pem', self.root / 'test-key.pem'
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                        '-keyout', str(key), '-out', str(certificate), '-subj', '/CN=localhost',
+                        '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'],
+                       check=True, capture_output=True)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certificate, key)
+        self.model.close()
+        self.model = FakeModel(context)
+        self.config['base_url'] = self.model.url
+        self.chat.config.path.write_text(json.dumps(self.config), 'utf-8')
+        self.model.replies = [response('HTTPS 已验证')]
+        verified_client = ssl.create_default_context(cafile=str(certificate))
+        with mock.patch('ssl._create_default_https_context', return_value=verified_client):
+            session = self.send(self.preview())
+            result = self.wait(session['id'])
+        self.assertEqual(result['session']['state'], 'idle', result)
+        self.assertIn('HTTPS 已验证', self.chat.report(session['id'])['text'])
 
     def test_anthropic_stream_and_json_adapter(self):
         self.config['provider'] = 'anthropic'
