@@ -7,7 +7,8 @@ const UI_STATE_KEY = 'logscope.ui.v1';
 const COLLECT_JOB_KEY = 'logscope.collector.job';
 let savedUI={};
 try { savedUI=JSON.parse(localStorage.getItem(UI_STATE_KEY)||'{}'); } catch {}
-const state = { dataset: savedUI.dataset || '', datasets: [], files: [], view: 'search', page: 1, tracePage: 1, lastSearch: null, lastTrace: null, rows: new Map(), searchSerial: 0, traceSerial: 0, refreshSerial: 0, correlation: null, collectionSerial: 0 };
+const state = { dataset: savedUI.dataset || '', datasets: [], files: [], view: 'search', page: 1, tracePage: 1, lastSearch: null, lastTrace: null, rows: new Map(), searchSerial: 0, traceSerial: 0, refreshSerial: 0, correlation: null, collectionSerial: 0, uiRestored: false, datasetsLoading: false, datasetRefreshPending: true };
+let datasetRetryTimer;
 let collectorEnvironments=[];
 let toastTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 4500); }
@@ -21,7 +22,12 @@ function showProgress(element,title,detail='',percent=null,tone='active') {
 async function api(path, body) {
   const response = await fetch(path, body === undefined ? {} : { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || '请求失败');
+  if (!response.ok) {
+    const error = new Error(result.error || '请求失败');
+    error.status = response.status; error.code = result.code || '';
+    if (error.code === 'INDEX_MAINTENANCE') document.dispatchEvent(new CustomEvent('logscope:maintenance', {detail:error}));
+    throw error;
+  }
   return result;
 }
 function paramsURL(params) { return new URLSearchParams(Object.entries(params).filter(([,v]) => v !== '' && v != null)).toString(); }
@@ -36,6 +42,7 @@ function formState(form) {
   return result;
 }
 function saveUI() {
+  if (!state.uiRestored) return;
   const value={dataset:state.dataset,view:state.view,search:formState($('#searchForm')),
     advanced:$('#advanced').open,trace:$('#traceId').value,fileSearch:$('#fileSearch').value,
     collector:{environment:$('#collectEnvironment').value,pod:$('#collectPod').value,start:$('#collectStart').value,end:$('#collectEnd').value,
@@ -98,6 +105,9 @@ function clearResults() {
 }
 async function refreshDatasets(selectId) {
   const serial = ++state.refreshSerial;
+  clearTimeout(datasetRetryTimer);
+  state.datasetsLoading = true;
+  try {
   const datasets = await api('/api/datasets');
   if (serial !== state.refreshSerial) return;
   const ready = datasets.filter(d => d.state === 'ready');
@@ -128,15 +138,28 @@ async function refreshDatasets(selectId) {
     status.hidden = false; status.textContent = '导入提示：' + current.warnings.join('；');
   } else status.hidden = true;
   if (previous !== state.dataset || (state.dataset && !state.files.length)) {
-    state.files = []; updateFilters(); clearResults(); renderFiles();
+    state.files = []; clearResults(); renderFiles();
     if (previous !== state.dataset && $('#contextDialog').open) $('#contextDialog').close();
-    state.files = state.dataset ? await api('/api/files?dataset=' + state.dataset) : [];
+    const files = state.dataset ? await api('/api/files?dataset=' + state.dataset) : [];
     if (serial !== state.refreshSerial) return;
+    state.files = files;
     updateFilters(); clearResults(); renderFiles();
   }
+  state.datasetRefreshPending = false;
+  $('#datasetLoadNotice').hidden = true;
   saveUI();
   document.dispatchEvent(new CustomEvent('logscope:datasets', {detail: datasets}));
   return datasets;
+  } catch (error) {
+    if (serial !== state.refreshSerial) return;
+    state.datasetRefreshPending = true;
+    $('#datasetLoadNotice').hidden = false;
+    $('#datasetLoadMessage').textContent = error.code === 'INDEX_MAINTENANCE'
+      ? '日志索引正在维护，列表稍后自动重试。已保留你的页面和输入内容。'
+      : `日志包列表暂未加载：${error.message}。已保留输入内容，可以重试。`;
+    datasetRetryTimer = setTimeout(() => { void refreshDatasets().catch(() => {}); }, error.code === 'INDEX_MAINTENANCE' ? 10000 : 5000);
+    throw error;
+  } finally { if (serial === state.refreshSerial) state.datasetsLoading = false; }
 }
 function formatBytes(value) {
   let size=Number(value||0),unit='B';
@@ -460,16 +483,31 @@ document.addEventListener('click',async e=>{
     if(action==='widen'&&state.correlation){const c=state.correlation;await correlate(c.row,60,c.sameThread);}
   }catch(error){toast(error.message);}
 });
+// Restore drafts before any network request: maintenance must not wipe local UI state.
+for (const element of $('#searchForm').elements) {
+  const key = element.name || element.id;
+  if (savedUI.search?.[key] === undefined) continue;
+  if (['node','pod','service','kind'].includes(key)) {
+    const value = String(savedUI.search[key] || '');
+    if (value) element.add(new Option(value, value));
+    element.value = value;
+  } else if (element.type === 'checkbox') element.checked = Boolean(savedUI.search[key]);
+  else element.value = savedUI.search[key];
+}
+$('#advanced').open = Boolean(savedUI.advanced);
+$('#traceId').value = savedUI.trace || '';
+$('#fileSearch').value = savedUI.fileSearch || '';
+const initialCollector = savedUI.collector || {};
+for(const [id,key] of [['collectPod','pod'],['collectStart','start'],['collectEnd','end'],['collectUrl','url'],['collectUser','user'],['collectHeadless','headless'],['collectTimeout','timeout'],['collectPoll','poll'],['collectEncoding','encoding'],['collectOffset','offset'],['collectUnit','unit']])if(initialCollector[key]!==undefined)$('#'+id).value=initialCollector[key];
+state.view = savedUI.view || 'search';
+state.uiRestored = true;
 clearResults();
-refreshDatasets(state.dataset).then(datasets=>{
-  restoreSearchForm(savedUI.search);$('#traceId').value=savedUI.trace||'';
-  $('#fileSearch').value=savedUI.fileSearch||'';
-  const collector=savedUI.collector||{};
-  for(const [id,key] of [['collectPod','pod'],['collectStart','start'],['collectEnd','end'],['collectUrl','url'],['collectUser','user'],['collectHeadless','headless'],['collectTimeout','timeout'],['collectPoll','poll'],['collectEncoding','encoding'],['collectOffset','offset'],['collectUnit','unit']])if(collector[key]!==undefined)$('#'+id).value=collector[key];
-  setTimeout(()=>setView(savedUI.view||'search'),0);
-  const collectionJob=localStorage.getItem(COLLECT_JOB_KEY);if(collectionJob)pollCollection(collectionJob);
-  if(datasets?.some(d=>d.state==='importing')) {
-    const poll=async()=>{try{const all=await refreshDatasets();if(all?.some(d=>d.state==='importing'))setTimeout(poll,1500);}catch(e){toast(e.message);}};
-    setTimeout(poll,1500);
-  }
-}).catch(error=>toast('无法连接本地服务：'+error.message));
+setTimeout(() => setView(state.view), 0);
+$('#datasetLoadRetry').addEventListener('click', () => { void refreshDatasets().catch(() => {}); });
+let importResumeTimer;
+document.addEventListener('logscope:datasets', event => {
+  clearTimeout(importResumeTimer);
+  if(event.detail?.some(dataset => dataset.state === 'importing')) importResumeTimer = setTimeout(() => { void refreshDatasets().catch(() => {}); }, 1500);
+});
+const initialCollectionJob=localStorage.getItem(COLLECT_JOB_KEY);if(initialCollectionJob)pollCollection(initialCollectionJob);
+void refreshDatasets(state.dataset).catch(() => {});

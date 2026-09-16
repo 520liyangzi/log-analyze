@@ -78,6 +78,11 @@ jobs:
             if ($chatScript.StatusCode -ne 200) { throw 'Missing native chat assets' }
             $retention = Invoke-RestMethod 'http://127.0.0.1:8877/api/retention'
             if (-not $retention.enabled -or $retention.hours -ne 72 -or $retention.schedule -ne '02:00') { throw 'Missing default retention schedule' }
+            if ($retention.phase -ne 'idle' -or $retention.maintenance) { throw 'Fresh executable must not enter startup maintenance' }
+            $retentionConfig = Get-Content (Join-Path $data 'retention-config.json') -Raw | ConvertFrom-Json
+            if ($retentionConfig.startup_catchup -ne $false -or $retentionConfig.max_run_seconds -ne 300) { throw 'Missing safe retention defaults' }
+            $cancel = Invoke-RestMethod 'http://127.0.0.1:8877/api/retention/cancel' -Method Post -ContentType 'application/json' -Body '{}'
+            if ($cancel.maintenance) { throw 'Idle cancellation must not start maintenance' }
             $retentionScript = Invoke-WebRequest 'http://127.0.0.1:8877/retention.js' -UseBasicParsing
             if ($retentionScript.StatusCode -ne 200) { throw 'Missing archive retention assets' }
           } finally {

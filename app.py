@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 from collector_environments import CollectorEnvironments
 from chat_engine import ChatManager
 from log_collector import LogCollector
-from index_retention import dataset_lifecycle, expire_indexes
+from index_retention import IndexMaintenance, dataset_lifecycle, expire_indexes
 from retention import RetentionManager
 from runtime_paths import APP_ROOT, FROZEN, RESOURCE_ROOT
 from terminal_bridge import TerminalManager, dimensions
@@ -226,14 +226,14 @@ class Store:
                             for window in dict.fromkeys(windows))
 
     @contextlib.contextmanager
-    def connect(self):
+    def connect(self, timeout=60):
         with self.access_lock:
             if self.maintenance_owner is not None and self.maintenance_owner != threading.get_ident():
-                raise ValueError('正在清理过期日志索引并整理数据库，请稍后重试；ZIP 和 AI 历史保留不变')
+                raise IndexMaintenance('正在维护日志数据库，服务仍正常运行；可查看清理进度或取消本轮清理')
             self.connections += 1
         db = None
         try:
-            db = sqlite3.connect(self.database, timeout=60)
+            db = sqlite3.connect(self.database, timeout=timeout)
             db.row_factory = sqlite3.Row
             db.execute('PRAGMA synchronous=NORMAL')
             db.execute('PRAGMA cache_size=-32768')
@@ -463,8 +463,8 @@ class Store:
             row['archive_relative_path'] = 'archives/' + row['id'] + '.zip'
         return rows
 
-    def expire_indexes(self, cutoff, busy=lambda: False):
-        return expire_indexes(self, cutoff, busy)
+    def expire_indexes(self, cutoff, busy=lambda: False, control=None):
+        return expire_indexes(self, cutoff, busy, control=control)
 
     def original_archive(self, identifier):
         with self.connect() as db:
@@ -742,7 +742,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/2.1'
+    server_version = 'LogScope/2.2'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -871,6 +871,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(raw)
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except IndexMaintenance as exc:
+            self.json({'error': str(exc), 'code': 'INDEX_MAINTENANCE'}, 503)
         except (ValueError, KeyError, sqlite3.Error, OSError, zipfile.BadZipFile) as exc:
             self.json({'error': str(exc)}, 400)
     def do_POST(self):
@@ -909,7 +911,9 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(size) or b'{}')
                 if not isinstance(body, dict):
                     raise ValueError('JSON 请求必须是对象')
-                if parsed.path == '/api/chat/preview':
+                if parsed.path == '/api/retention/cancel':
+                    self.json(self.server.retention.cancel())
+                elif parsed.path == '/api/chat/preview':
                     self.json(self.server.chats.preview(body))
                 elif parsed.path == '/api/chat/send':
                     self.json(self.server.chats.send(body), 202)
@@ -972,6 +976,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.json(self.server.terminals.delete(body))
                 else:
                     self.json({'error':'不存在'}, 404)
+        except IndexMaintenance as exc:
+            self.json({'error': str(exc), 'code': 'INDEX_MAINTENANCE'}, 503)
         except (ValueError, KeyError, OSError, EOFError) as exc:
             self.json({'error': str(exc)}, 400)
         finally:

@@ -21,8 +21,8 @@
   <button id="sideCollect" class="outline wide">⇩ 在线采集日志</button>
   <button id="sideEnvironments" class="outline wide">⚙ 采集环境管理</button>
   <button id="deleteDataset" class="danger-outline wide" disabled>删除当前日志包</button>
-  <div class="retention-summary"><strong>索引 72 小时过期 · ZIP 保留</strong><p>每天服务电脑本地 02:00 清理</p><small id="retentionStatus" role="status">正在读取清理计划…</small><button id="retainedArchives" class="text-button">查看保留 ZIP <span id="retainedCount">0</span></button></div>
-  <div class="side-bottom"><div class="local-badge"><span></span> 本机索引 · 原生 AI 对话</div><p>日志在本机检索；AI 仅接收命中片段，使用维护者配置的共享模型。</p><div class="version">LOGSCOPE <span>v2.1</span></div></div>
+  <div class="retention-summary"><strong>索引 72 小时过期 · ZIP 保留</strong><p>本地 02:00 清理 · 默认不补扫</p><small id="retentionStatus" role="status">正在读取清理计划…</small><button id="retainedArchives" class="text-button">查看保留 ZIP <span id="retainedCount">0</span></button></div>
+  <div class="side-bottom"><div class="local-badge"><span></span> 本机索引 · 原生 AI 对话</div><p>日志在本机检索；AI 仅接收命中片段，使用维护者配置的共享模型。</p><div class="version">LOGSCOPE <span>v2.2</span></div></div>
 </aside>
 <main>
   <header class="topbar"><div><span class="breadcrumb">工作空间</span><span class="slash">/</span><span id="viewLabel">全局搜索</span></div><span class="quiet">本机离线索引</span></header>
@@ -30,7 +30,8 @@
     <div class="page-heading"><div><p class="eyebrow">INVESTIGATE YOUR LOGS</p><h1 id="viewTitle">每一条日志，都有迹可循。</h1><p id="viewDescription">跨节点搜索，从接口请求一路定位到异常现场。</p></div><div class="page-actions"><button id="topEnvironments" class="quiet-action">⚙ 环境管理</button><button id="topCollect" class="quiet-action">⇩ 在线采集</button><button id="topUpload" class="primary">＋ 导入日志包</button></div></div>
     <section id="importStatus" class="import-status" hidden aria-live="polite"></section>
     <section id="collectionStatus" class="import-status collection-status" hidden aria-live="polite"></section>
-    <section id="retentionNotice" class="retention-notice" hidden aria-live="polite"></section>
+    <section id="retentionNotice" class="retention-notice" hidden aria-live="polite"><div class="retention-notice-heading"><strong id="retentionTitle"></strong><div class="retention-actions"><button id="retentionRetry" class="text-button" type="button">刷新状态</button><button id="retentionCancel" class="outline" type="button" hidden>停止本次清理</button></div></div><p id="retentionMessage"></p><div id="retentionProgress" hidden></div></section>
+    <section id="datasetLoadNotice" class="retention-notice" hidden aria-live="polite"><span id="datasetLoadMessage"></span><button id="datasetLoadRetry" class="text-button" type="button">重试加载</button></section>
     <section id="searchView">
       <form id="searchForm" class="search-panel">
         <div class="search-tabs"><span class="selected">日志搜索</span><span class="subtle">支持关键词 / 接口路径 / 时间片段</span><span class="shortcut">Ctrl / ⌘ K</span></div>
