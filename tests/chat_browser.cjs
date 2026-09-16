@@ -61,7 +61,7 @@ async function maintenanceRegression(browser, sourcePage) {
       last_result:{cancelled:true,reason:'本次清理已取消，日志查询已恢复'},next_run:'2026-09-17T02:00:00+08:00'};
     await page.locator('#retentionRetry').click();
     await page.waitForFunction(() => !state.retentionBusy && !state.datasetRefreshPending);
-    await page.locator('#datasetLoadNotice[hidden]').waitFor();
+    await page.locator('#datasetLoadNotice').waitFor({state:'hidden'});
     assert.equal(await page.locator('#query').inputValue(),'draft-edited-during-maintenance');
     assert.equal(await page.locator('#start').inputValue(),draft.search.start);
     assert.equal(await page.locator('#node').inputValue(),draft.search.node);
