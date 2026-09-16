@@ -215,6 +215,8 @@ print('download complete password=' + str(a.password),flush=True)
                     if job['state'] in ('ready','failed'):break
                     time.sleep(.05)
                 self.assertEqual(job['state'],'ready',job['message'])
+                self.assertIn('elapsed_seconds',job)
+                self.assertGreaterEqual(job['elapsed_seconds'],0)
                 self.assertNotIn('test secret',job['output'])
                 self.assertIn('[REDACTED]',job['output'])
                 result=api('/api/search?dataset='+job['dataset_id']+'&q=COLLECTED_MARKER')

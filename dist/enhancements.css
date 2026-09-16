@@ -1,5 +1,19 @@
 button:disabled { cursor: not-allowed; }
 button.is-loading:disabled { cursor: wait; }
+.progress-copy { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; color:#304b70; }
+.progress-copy strong { font-size:.86rem; font-weight:650; }
+.progress-copy span { color:#627896; font-size:.78rem; text-align:right; overflow-wrap:anywhere; }
+.progress-track { position:relative; height:9px; margin-top:10px; overflow:hidden; border-radius:999px; background:#dce7f6; }
+.progress-track>span { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,#376fe8,#63a0ff); transition:width .3s ease; }
+.progress-track.indeterminate>span { width:32%; animation:logscope-progress 1.45s ease-in-out infinite; }
+.progress-track.success>span { background:linear-gradient(90deg,#239a69,#52c792); }
+.progress-track.danger>span { background:linear-gradient(90deg,#c84e61,#ed8392); }
+.progress-percent { margin-top:5px; color:#59718f; font:11px var(--mono); text-align:right; }
+.import-status.complete { border-color:#a9dbc7; background:#effaf5; }
+#uploadProgress:empty { display:none; }
+#uploadProgress .progress-copy span { max-width:55%; }
+@keyframes logscope-progress { 0%{transform:translateX(-110%)} 55%{transform:translateX(115%)} 100%{transform:translateX(330%)} }
+@media (prefers-reduced-motion:reduce){.progress-track.indeterminate>span{animation-duration:3s}.progress-track>span{transition:none}}
 .page-actions { display: flex; align-items: center; gap: 10px; }
 .quiet-action { border: 1px solid #cad7eb; border-radius: 7px; padding: 10px 15px; color: #365b91; background: #fff; font-size: .85rem; }
 .quiet-action:hover { border-color: #8caae0; background: #f5f8ff; }

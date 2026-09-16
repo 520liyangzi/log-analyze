@@ -77,7 +77,7 @@ python collect_logs.py --pod xxxx --start "2026-09-10 14:00:00" --end "2026-09-1
 
 Skill 仍可选安装，作为外部 AI 发现查询工具的入口；分析流程统一从页面维护。日志解析格式变化仍需修改解析器，不会因为更新提示词自动修正旧索引。
 
-升级到 v1.19：EXE 用户关闭旧窗口后从 `exe` 分支或 Release 替换 `LogScope.exe`；源码用户停止旧服务 → `git pull` → `python -m pip install -r requirements.txt` → `python app.py` → 刷新页面。**已有日志不必重新导入，搜索、AI 配置和历史任务都不受影响。** 本版新增采集环境管理，将默认 AI 命令改为 `codeagent --dangerously-skip-permissions`，并修复 Windows CMD 被错误声明为 xterm 后出现的 `clear` 报错、颜色查询文本和混乱重绘。EXE 改为只发布到独立的 `exe` 分支和 Release，`main` 保持纯源码。
+升级到 v1.20：EXE 用户关闭旧窗口后从 `exe` 分支或 Release 替换 `LogScope.exe`；源码用户停止旧服务 → `git pull` → `python -m pip install -r requirements.txt` → `python app.py` → 刷新页面。**已有日志不必重新导入，搜索、AI 配置和历史任务都不受影响。** 本版为 ZIP 上传、平台采集、索引构建和日志包删除增加统一进度展示：上传显示真实百分比，平台等待与索引阶段显示动态进度及已等待时间、文件数、记录数、读取量和处理速度。平台和压缩包没有提供最终总量时，不显示虚假的百分比。EXE 只发布到独立的 `exe` 分支和 Release，`main` 保持纯源码。
 
 旧日志包仍按原索引正常搜索，不会在启动时自动重建。若要让旧包也获得空间与导入格式优化，需要升级后在页面删除该日志包，再用保留的原始 ZIP 重新上传，或重新在线采集一次；仅重启程序不会缩小旧数据库。三字符以上的任意关键词、中文、接口、`%` / `_` 等字面搜索行为保持不变。
 

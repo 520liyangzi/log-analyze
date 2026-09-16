@@ -11,6 +11,13 @@ const state = { dataset: savedUI.dataset || '', datasets: [], files: [], view: '
 let collectorEnvironments=[];
 let toastTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 4500); }
+function progressHTML(title, detail='', percent=null, tone='active') {
+  const determinate=Number.isFinite(percent),value=determinate?Math.max(0,Math.min(100,Math.round(percent))):null;
+  return `<div class="progress-copy"><strong>${escapeHTML(title)}</strong>${detail?`<span>${escapeHTML(detail)}</span>`:''}</div><div class="progress-track ${determinate?'determinate':'indeterminate'} ${escapeHTML(tone)}"${determinate?` role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"`:' role="progressbar" aria-label="正在处理"'}><span style="${determinate?`width:${value}%`:''}"></span></div>${determinate?`<div class="progress-percent">${value}%</div>`:''}`;
+}
+function showProgress(element,title,detail='',percent=null,tone='active') {
+  element.innerHTML=progressHTML(title,detail,percent,tone);
+}
 async function api(path, body) {
   const response = await fetch(path, body === undefined ? {} : { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
   const result = await response.json();
@@ -106,13 +113,14 @@ async function refreshDatasets(selectId) {
   const deleting = datasets.find(d => d.state === 'deleting');
   const failed = datasets.find(d => d.state === 'failed');
   const status = $('#importStatus');
-  status.classList.remove('failed');
+  status.classList.remove('failed','complete');
   if (deleting) {
-    status.hidden=false;status.textContent=`正在删除 ${deleting.name} 并释放磁盘空间…`;
+    status.hidden=false;showProgress(status,`正在删除 ${deleting.name}`,'正在释放磁盘空间，请稍候…');
   } else if (pending) {
     status.hidden = false;
     const p=pending.progress||{};
-    status.textContent = `正在解析 ${pending.name} … 已读取 ${number(p.files)} 个文件、${number(p.records)} 条记录、${formatBytes(p.bytes)}；当前约 ${number(p.records_per_second)} 条/秒。完成后将自动切换。`;
+    const current=p.current?` · ${p.current}`:'';
+    showProgress(status,`正在解析并建立索引：${pending.name}`,`已处理 ${number(p.files)} 个文件 · ${number(p.records)} 条记录 · ${formatBytes(p.bytes)} · ${number(p.records_per_second)} 条/秒${current}`);
   } else if (failed && datasets[0]?.id === failed.id && !selectId) {
     status.hidden = false; status.classList.add('failed'); status.textContent = `导入失败：${failed.name} — ${failed.error}。已有日志包仍可使用。`;
   } else if (current?.warnings.length) {
@@ -281,9 +289,20 @@ async function openCollector() {
   }catch(error){$('#collectorCapability').textContent=error.message;$('#collectSubmit').disabled=true;}
 }
 function renderCollection(job){
-  const status=$('#collectionStatus');status.hidden=false;status.classList.toggle('failed',job.state==='failed');
-  const label=job.state==='collecting'?'正在采集':job.state==='importing'?'正在导入':job.state==='ready'?'采集完成':'采集失败';
-  status.textContent=`${label} · ${job.pod} · ${job.start} 至 ${job.end} — ${job.message}`;
+  const status=$('#collectionStatus');status.hidden=false;status.classList.toggle('failed',job.state==='failed');status.classList.toggle('complete',job.state==='ready');
+  const scope=`${job.pod} · ${job.start} 至 ${job.end}`;
+  if(job.state==='collecting'){
+    const elapsed=Number(job.elapsed_seconds||0);
+    showProgress(status,'平台正在生成并下载 ZIP',`${scope} · 已等待 ${formatDuration(elapsed)} · ${job.message}`);
+  }else if(job.state==='importing'){
+    const p=job.progress||{};
+    showProgress(status,'ZIP 已下载，正在解析并建立索引',`${scope} · ${number(p.files)} 个文件 · ${number(p.records)} 条记录 · ${formatBytes(p.bytes)} · ${number(p.records_per_second)} 条/秒`);
+  }else if(job.state==='ready') showProgress(status,'采集和索引已完成',`${scope} · ${job.message}`,100,'success');
+  else showProgress(status,'采集失败',`${scope} · ${job.message}`,100,'danger');
+}
+function formatDuration(seconds){
+  const value=Math.max(0,Math.floor(Number(seconds)||0)),minutes=Math.floor(value/60),rest=value%60;
+  return minutes?`${minutes} 分 ${rest} 秒`:`${rest} 秒`;
 }
 async function pollCollection(identifier){
   const serial=++state.collectionSerial;
@@ -325,16 +344,17 @@ let selectedFile;
 function chooseFile(file) { if(!file) return; selectedFile=file; $('#chosenName').textContent=`${file.name} · ${(file.size/1024/1024).toFixed(2)} MB`; }
 async function upload(file) {
   if(!file || !file.name.toLowerCase().endsWith('.zip')) return toast('请选择 ZIP 文件');
-  const button=$('#uploadSubmit'); button.disabled=true; $('#uploadProgress').textContent='准备上传…';
+  const button=$('#uploadSubmit'); button.disabled=true; showProgress($('#uploadProgress'),'准备上传 ZIP','正在建立本机连接…',0);
   try {
     const params={name:file.name,encoding:$('#encoding').value,offset:$('#importOffset').value,unit:$('#durationUnit').value};
     const result=await new Promise((resolve,reject)=>{
       const xhr=new XMLHttpRequest(); xhr.open('POST','/api/upload?'+paramsURL(params)); xhr.setRequestHeader('Content-Type','application/zip');
-      xhr.upload.onprogress=e=>{if(e.lengthComputable) $('#uploadProgress').textContent=`上传中 ${Math.round(e.loaded/e.total*100)}% · 正在写入本机`;};
+      xhr.upload.onprogress=e=>{if(e.lengthComputable)showProgress($('#uploadProgress'),'正在上传 ZIP',`${formatBytes(e.loaded)} / ${formatBytes(e.total)}`,e.loaded/e.total*100);};
+      xhr.upload.onload=()=>showProgress($('#uploadProgress'),'ZIP 上传完成','正在提交导入任务…',100,'success');
       xhr.onload=()=>{try{const r=JSON.parse(xhr.responseText); xhr.status>=200&&xhr.status<300?resolve(r):reject(new Error(r.error||'上传失败'));}catch{reject(new Error('上传响应异常'));}};
       xhr.onerror=()=>reject(new Error('上传失败，请检查本地服务是否仍在运行')); xhr.send(file);
     });
-    $('#uploadDialog').close(); $('#uploadProgress').textContent=''; toast('上传完成，正在解析日志包');
+    $('#uploadDialog').close(); $('#uploadProgress').innerHTML=''; toast('上传完成，正在解析日志包');
     await refreshDatasets();
     const poll=async()=>{
       try {
@@ -344,7 +364,7 @@ async function upload(file) {
         else setTimeout(poll,1200);
       }catch(error){toast(error.message);}
     }; setTimeout(poll,700);
-  }catch(error){$('#uploadProgress').textContent=error.message;}
+  }catch(error){showProgress($('#uploadProgress'),'上传失败',error.message,100,'danger');}
   finally{button.disabled=false;}
 }
 $('#uploadFile').addEventListener('change',e=>chooseFile(e.target.files[0]));

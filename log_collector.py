@@ -184,9 +184,15 @@ class LogCollector:
                     job.update(state='failed', message='ZIP 已下载，但导入失败：' + dataset.get('error', '未知错误'))
                 elif dataset.get('progress'):
                     progress = dataset['progress']
+                    job['progress'] = progress
                     job['message'] = f'正在建立索引：{progress.get("files", 0):,} 个文件、{progress.get("records", 0):,} 条记录'
             with self.lock:
                 self.jobs[identifier].update(state=job['state'], message=job['message'])
+        try:
+            created = dt.datetime.fromisoformat(job['created'])
+            job['elapsed_seconds'] = max(0, round((dt.datetime.now(dt.timezone.utc) - created).total_seconds()))
+        except (KeyError, TypeError, ValueError):
+            job['elapsed_seconds'] = 0
         return job
 
     def close(self):
