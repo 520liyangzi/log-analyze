@@ -173,7 +173,10 @@ class ModelClient:
             body = json.dumps(self.payload(system, messages, tools), ensure_ascii=False).encode('utf-8')
             connection.request('POST', path, body=body, headers=headers)
             with self.lock:
-                self.socket = connection.sock
+                # getresponse() may detach/close the original socket when the
+                # server uses Connection: close. Keep a separate handle so a
+                # Windows shutdown still interrupts the reader immediately.
+                self.socket = connection.sock.dup() if connection.sock else None
             if self.stop.is_set():
                 raise Cancelled()
             response = connection.getresponse()
@@ -261,5 +264,7 @@ class ModelClient:
         finally:
             connection.close()
             with self.lock:
+                if self.socket:
+                    self.socket.close()
                 self.connection = None
                 self.socket = None

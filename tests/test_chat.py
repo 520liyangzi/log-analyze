@@ -1,5 +1,6 @@
 import copy
 import json
+import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
@@ -295,6 +296,12 @@ class NativeChatTests(unittest.TestCase):
         compact, shortened = self.chat.budget(messages, 200)
         self.assertTrue(shortened)
         self.assertEqual(compact, [dict(role='user', content='new')])
+
+    def test_database_context_releases_connection_without_garbage_collection(self):
+        with self.chat.db() as db:
+            db.execute('SELECT 1')
+        with self.assertRaises(sqlite3.ProgrammingError):
+            db.execute('SELECT 1')
 
     def test_anthropic_stream_and_json_adapter(self):
         self.config['provider'] = 'anthropic'

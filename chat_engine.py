@@ -1,5 +1,6 @@
 """Persistent native investigations, independent of CLI terminals and provider sessions."""
 import concurrent.futures
+import contextlib
 import copy
 import datetime as dt
 import json
@@ -101,10 +102,17 @@ class ChatManager:
                     self.version += 1
                     db.execute('UPDATE events SET body=?,version=? WHERE id=?', (dumps(body), self.version, row['id']))
 
+    @contextlib.contextmanager
     def db(self):
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            # sqlite3.Connection's context manager commits, but does not close.
+            # Explicit closure matters on Windows (file locks) and on long runs.
+            db.close()
 
     def _get(self, identifier):
         with self.db() as db:
