@@ -15,6 +15,7 @@ import time
 import uuid
 from analysis_rules import AnalysisRules, atomic_json, render_code_task, render_rules, render_task
 from project_access import inspect_repository, select_revision
+from index_retention import dataset_lifecycle
 from runtime_paths import FROZEN, RESOURCE_ROOT, SOURCE_ROOT
 
 TASK_PROMPT = 'Read task.md in the current directory. Use its rules and query tools to investigate the question. Reply in Chinese and write report.md.'
@@ -402,6 +403,7 @@ class TerminalManager:
         task, rules, text = self.prepare(body)
         return dict(task=task, rules=rules, text=text)
 
+    @dataset_lifecycle
     def start(self, body):
         config = self.config()
         if not config['available']:
@@ -490,6 +492,7 @@ class TerminalManager:
             atomic_json(self.session_directory(identifier) / 'session.json', info)
             return self.saved_info(identifier)
 
+    @dataset_lifecycle
     def resume(self, body):
         config = self.config()
         if not config['available']:
@@ -508,6 +511,8 @@ class TerminalManager:
             info = self.saved_info(identifier)
             ai_session_id = self.validate_ai_session_id(body.get('ai_session_id') or info.get('ai_session_id'))
             task = json.loads((directory / 'task.json').read_text('utf-8'))
+            with self.store.connect() as db:
+                self.store.require_ready(db, task.get('dataset', ''))
             env = terminal_environment(self.url, task.get('dataset', ''))
             pty = WindowsPTY(directory, env, cols, rows) if os.name == 'nt' else UnixPTY(directory, env, cols, rows)
             session = Session(identifier, directory, task.get('dataset', ''), config['command'], pty, task,

@@ -14,6 +14,7 @@ import uuid
 import zipfile
 from urllib.parse import urlsplit
 from runtime_paths import FROZEN
+from index_retention import dataset_lifecycle
 
 
 class LogCollector:
@@ -57,7 +58,10 @@ class LogCollector:
             reason = ''
         return {'available': available, 'script': self.script.name, 'reason': reason}
 
+    @dataset_lifecycle
     def start(self, body):
+        with self.store.connect():
+            pass  # Fail promptly if index maintenance has reserved the database.
         if not self.capability()['available']:
             raise ValueError(self.capability()['reason'])
         with self.lock:

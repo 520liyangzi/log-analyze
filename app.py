@@ -20,10 +20,12 @@ import webbrowser
 import zipfile
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 from collector_environments import CollectorEnvironments
 from chat_engine import ChatManager
 from log_collector import LogCollector
+from index_retention import dataset_lifecycle, expire_indexes
+from retention import RetentionManager
 from runtime_paths import APP_ROOT, FROZEN, RESOURCE_ROOT
 from terminal_bridge import TerminalManager, dimensions
 
@@ -136,6 +138,10 @@ class Store:
         self.database = self.directory / 'logs.sqlite3'
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.progress = {}
+        self.lifecycle_lock = threading.RLock()
+        self.access_lock = threading.RLock()
+        self.connections = 0
+        self.maintenance_owner = None
         with self.connect() as db:
             db.executescript('''
               PRAGMA journal_mode=WAL;
@@ -153,6 +159,7 @@ class Store:
               CREATE INDEX IF NOT EXISTS logs_url ON logs(dataset,url) WHERE url != '';
               CREATE INDEX IF NOT EXISTS logs_file_line ON logs(file_id,line);
               CREATE INDEX IF NOT EXISTS files_scope ON files(dataset,node,pod,kind);
+              CREATE TABLE IF NOT EXISTS log_metadata(key TEXT PRIMARY KEY, value TEXT);
             ''')
             if 'archive_chain' not in {r['name'] for r in db.execute('PRAGMA table_info(files)')}:
                 db.execute("ALTER TABLE files ADD COLUMN archive_chain TEXT")
@@ -162,9 +169,11 @@ class Store:
                     db.execute(f'ALTER TABLE logs ADD COLUMN {key} {kind}')
             dataset_columns = {r['name'] for r in db.execute('PRAGMA table_info(datasets)')}
             for key, kind in [('parser_version', 'INTEGER DEFAULT 1'), ('index_version', 'INTEGER DEFAULT 1'),
+                              ('completed_at', 'TEXT'), ('expired_at', 'TEXT'),
                               ('audit', "TEXT DEFAULT '{}' ")]:
                 if key not in dataset_columns:
                     db.execute(f'ALTER TABLE datasets ADD COLUMN {key} {kind}')
+            db.execute("INSERT OR IGNORE INTO log_metadata SELECT 'last_log_id',CAST(COALESCE(MAX(id),0) AS TEXT) FROM logs")
             db.execute('CREATE INDEX IF NOT EXISTS logs_route ON logs(dataset,route_id)')
             db.execute('CREATE INDEX IF NOT EXISTS logs_request_id ON logs(dataset,request_id)')
             db.execute("UPDATE datasets SET state='failed', error='上次导入被中断，请重新上传' WHERE state='importing'")
@@ -218,20 +227,30 @@ class Store:
 
     @contextlib.contextmanager
     def connect(self):
-        db = sqlite3.connect(self.database, timeout=60)
-        db.row_factory = sqlite3.Row
-        db.execute('PRAGMA synchronous=NORMAL')
-        db.execute('PRAGMA cache_size=-32768')
-        db.execute('PRAGMA temp_store=FILE')
+        with self.access_lock:
+            if self.maintenance_owner is not None and self.maintenance_owner != threading.get_ident():
+                raise ValueError('正在清理过期日志索引并整理数据库，请稍后重试；ZIP 和 AI 历史保留不变')
+            self.connections += 1
+        db = None
         try:
+            db = sqlite3.connect(self.database, timeout=60)
+            db.row_factory = sqlite3.Row
+            db.execute('PRAGMA synchronous=NORMAL')
+            db.execute('PRAGMA cache_size=-32768')
+            db.execute('PRAGMA temp_store=FILE')
             yield db
             db.commit()
         except BaseException:
-            db.rollback()
+            if db is not None:
+                db.rollback()
             raise
         finally:
-            db.close()
+            if db is not None:
+                db.close()
+            with self.access_lock:
+                self.connections -= 1
 
+    @dataset_lifecycle
     def submit(self, path, name, encoding='auto', offset='+0800', unit='ms'):
         if encoding not in ('auto', 'utf-8', 'gb18030'):
             raise ValueError('编码无效')
@@ -260,7 +279,8 @@ class Store:
                 columns = ('id','dataset','file_id','line','end_line',*base,*EXTRA_FIELDS.keys(),'raw')
                 insert_logs = ('INSERT INTO logs(' + ','.join(columns) + ') VALUES('
                                + ','.join('?' for _ in columns) + ')')
-                next_log_id = db.execute('SELECT COALESCE(MAX(id),0)+1 FROM logs').fetchone()[0]
+                next_log_id = max(db.execute('SELECT COALESCE(MAX(id),0) FROM logs').fetchone()[0],
+                                  int(db.execute("SELECT value FROM log_metadata WHERE key='last_log_id'").fetchone()[0])) + 1
                 records_buffer = []
                 fts_buffer = []
 
@@ -276,6 +296,7 @@ class Store:
                     db.executemany(insert_logs, records_buffer)
                     if self.write_fts:
                         db.executemany(f'INSERT INTO {self.write_fts}(rowid,raw) VALUES(?,?)', fts_buffer)
+                    db.execute("UPDATE log_metadata SET value=? WHERE key='last_log_id'", (str(next_log_id - 1),))
                     records_buffer.clear()
                     fts_buffer.clear()
                     # Bound WAL growth and make long imports release Python row buffers.
@@ -401,9 +422,9 @@ class Store:
                     audit.update(missing_count=len(missing), unlisted_count=len(unlisted), missing=missing[:100], unlisted=unlisted[:100])
                     if missing or unlisted:
                         warnings.append(f'清单核对：{len(missing)} 个清单路径未导入，{len(unlisted)} 个实际日志不在清单中。')
-                db.execute("UPDATE datasets SET state='ready',files=?,records=?,warnings=?,parser_version=?,audit=? WHERE id=?",
+                db.execute("UPDATE datasets SET state='ready',files=?,records=?,warnings=?,parser_version=?,audit=?,completed_at=? WHERE id=?",
                            (stats['files'], stats['records'], json.dumps(warnings, ensure_ascii=False), PARSER_VERSION,
-                            json.dumps(audit, ensure_ascii=False), identifier))
+                            json.dumps(audit, ensure_ascii=False), dt.datetime.now(dt.timezone.utc).isoformat(), identifier))
             try:
                 with self.connect() as db:
                     db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
@@ -439,8 +460,23 @@ class Store:
             row['progress'] = self.progress.get(row['id'])
             archive = self.directory / 'archives' / (row['id'] + '.zip')
             row['archive_bytes'] = archive.stat().st_size if archive.exists() else 0
+            row['archive_relative_path'] = 'archives/' + row['id'] + '.zip'
         return rows
 
+    def expire_indexes(self, cutoff, busy=lambda: False):
+        return expire_indexes(self, cutoff, busy)
+
+    def original_archive(self, identifier):
+        with self.connect() as db:
+            row = db.execute('SELECT name FROM datasets WHERE id=?', (identifier,)).fetchone()
+        if not row or not re.fullmatch(r'[a-f0-9]{32}', identifier):
+            raise ValueError('原始 ZIP 不存在')
+        archive = self.directory / 'archives' / (identifier + '.zip')
+        if not archive.is_file():
+            raise ValueError('此日志包没有保留原始 ZIP，请使用原来的上传文件')
+        return archive, row['name']
+
+    @dataset_lifecycle
     def request_delete(self, identifier, compact=False):
         with self.connect() as db:
             row = db.execute('SELECT state FROM datasets WHERE id=?', (identifier,)).fetchone()
@@ -484,6 +520,8 @@ class Store:
 
     def require_ready(self, db, identifier):
         row = db.execute('SELECT state FROM datasets WHERE id=?', (identifier,)).fetchone()
+        if row and row['state'] == 'expired':
+            raise ValueError('此日志包的索引已过期清理，原始 ZIP 仍保留；请从“保留的 ZIP”下载后重新导入')
         if not row or row['state'] != 'ready':
             raise ValueError('请先选择导入完成的日志包')
 
@@ -600,12 +638,16 @@ class Store:
             return [dict(r) for r in db.execute('SELECT * FROM logs WHERE file_id=? AND line BETWEEN ? AND ? ORDER BY line',
                                                (row['file_id'], max(1, row['line'] - radius), row['end_line'] + radius))]
 
-    def record(self, identifier):
+    def record(self, identifier, dataset=None):
         with self.connect() as db:
+            if dataset:
+                self.require_ready(db, dataset)
             row = db.execute('SELECT l.*,f.node,f.namespace,f.pod,f.service,f.kind,f.filename,f.source,f.path,f.archive_chain,f.encoding '
                              'FROM logs l JOIN files f ON f.id=l.file_id WHERE l.id=?', (identifier,)).fetchone()
             if not row:
-                raise ValueError('日志不存在')
+                raise ValueError('日志不存在，可能已过期清理；请重新导入原始 ZIP 后新建排查')
+            if dataset and row['dataset'] != dataset:
+                raise ValueError('此证据不属于原排查日志包，原索引可能已清理；请重新导入后新建排查')
             self.require_ready(db, row['dataset'])
             return dict(row)
 
@@ -700,7 +742,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/2.0'
+    server_version = 'LogScope/2.1'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -748,6 +790,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(self.server.chats.projects.status(params.get('id', '')))
             elif parsed.path == '/api/datasets':
                 self.json(self.store.datasets())
+            elif parsed.path == '/api/retention':
+                self.json(self.server.retention.status())
+            elif parsed.path == '/api/archives/download':
+                archive, name = self.store.original_archive(params.get('dataset', ''))
+                with archive.open('rb') as source:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/zip')
+                    self.send_header('Content-Disposition', "attachment; filename=logs.zip; filename*=UTF-8''" + quote(name, safe=''))
+                    self.send_header('Content-Length', str(os.fstat(source.fileno()).st_size))
+                    self.end_headers()
+                    shutil.copyfileobj(source, self.wfile, length=256 * 1024)
             elif parsed.path == '/api/collector/capability':
                 self.json(self.server.collector.capability())
             elif parsed.path == '/api/collector/status':
@@ -761,7 +814,7 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == '/api/context':
                 self.json(self.store.context(int(params['id']), min(200, max(1, int(params.get('radius', 15))))))
             elif parsed.path == '/api/record':
-                self.json(self.store.record(int(params['id'])))
+                self.json(self.store.record(int(params['id']), params.get('dataset')))
             elif parsed.path == '/api/verify':
                 self.json(self.store.verify(int(params['id'])))
             elif parsed.path == '/api/correlate':
@@ -802,6 +855,7 @@ class Handler(BaseHTTPRequestHandler):
                 routes = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css',
                           '/enhancements.css': 'enhancements.css', '/terminal.js': 'terminal.js',
                           '/chat.js': 'chat.js', '/chat.css': 'chat.css',
+                          '/retention.js': 'retention.js', '/retention.css': 'retention.css',
                           '/vendor/xterm.js': 'vendor/xterm.js', '/vendor/xterm.css': 'vendor/xterm.css',
                           '/vendor/addon-fit.js': 'vendor/addon-fit.js'}
                 if parsed.path not in routes:
@@ -893,11 +947,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.json(self.server.terminals.save_ai_session_id(body))
                 elif parsed.path == '/api/datasets/delete':
                     identifier = str(body.get('dataset', ''))
-                    if self.server.terminals.dataset_in_use(identifier):
-                        raise ValueError('该日志包正在被 AI 终端使用，请先结束对应终端')
-                    if self.server.chats.dataset_in_use(identifier):
-                        raise ValueError('该日志包正在被原生 AI 排查使用，请先停止对应会话')
-                    self.store.request_delete(identifier, body.get('compact') is True)
+                    with self.store.lifecycle_lock:
+                        if self.server.terminals.dataset_in_use(identifier):
+                            raise ValueError('该日志包正在被 AI 终端使用，请先结束对应终端')
+                        if self.server.chats.dataset_in_use(identifier):
+                            raise ValueError('该日志包正在被原生 AI 排查使用，请先停止对应会话')
+                        self.store.request_delete(identifier, body.get('compact') is True)
                     self.json({'ok': True, 'id': identifier}, 202)
                 elif parsed.path == '/api/terminal/input':
                     self.server.terminals.get(body['id']).write(body.get('data', ''))
@@ -925,7 +980,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class LocalServer(ThreadingHTTPServer):
+    def retention_busy(self):
+        with self.terminals.lock:
+            if any(s.state == 'running' for s in self.terminals.sessions.values()):
+                return True
+        with self.chats.lock:
+            if self.chats.active:
+                return True
+        with self.collector.lock:
+            return bool(self.collector.processes) or any(j['state'] == 'collecting' for j in self.collector.jobs.values())
+
     def server_close(self):
+        if hasattr(self, 'retention'):
+            self.retention.close()
         if hasattr(self, 'chats'):
             self.chats.close()
         if hasattr(self, 'collector'):
@@ -952,6 +1019,8 @@ def make_server(directory, port=8765, collect_script=None, host='127.0.0.1', all
     server.collector_environments = CollectorEnvironments(server.store.directory)
     server.collector = LogCollector(server.store, collect_script or APP_ROOT / 'collect_logs.py')
     server.chats = ChatManager(server.store)
+    server.retention = RetentionManager(server.store, server.retention_busy)
+    server.retention.start()
     return server
 
 

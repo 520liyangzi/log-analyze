@@ -15,6 +15,15 @@ const assert = require('node:assert/strict');
       catch(error) { if(i===29)throw error; await new Promise(resolve=>setTimeout(resolve,1000)); }
     }
     await page.locator('#datasetInfo').filter({hasText:'份日志文件'}).waitFor();
+    await page.locator('#retainedCount').filter({hasText:'1'}).waitFor();
+    await page.locator('#retainedArchives').click();
+    await page.locator('#retainedDialog[open]').waitFor();
+    await page.locator('#retainedArchiveList').filter({hasText:'过期示例.zip'}).waitFor();
+    const [archive] = await Promise.all([page.waitForEvent('download'), page.locator('.retained-download').click()]);
+    assert.equal(archive.suggestedFilename(),'过期示例.zip');
+    assert.equal(await archive.failure(),null);
+    await page.screenshot({path:'test-results/retention-archives.png',fullPage:true});
+    await page.locator('#retainedDialog .close').click();
     await page.locator('[data-view="chat"]').click();
     await page.locator('#chatCapability').filter({hasText:'共享模型已配置'}).waitFor();
     await page.locator('#chatQuestion').fill('帮我分析 /api/model/map 为什么报错，需要给出日志证据。');
@@ -54,7 +63,7 @@ const assert = require('node:assert/strict');
     await page.locator('#chatDelete').click();
     await page.locator('#chatTitle').filter({hasText:'新建排查'}).waitFor();
     assert.equal(await page.locator('[data-chat-session]').count(),0);
-    console.log('Native chat browser regression passed: preview, tools, evidence, follow-up, reload, drafts, rules, sessions, mobile, delete.');
+    console.log('Browser regression passed: retained ZIP/download, preview, tools, evidence, follow-up, reload, drafts, rules, sessions, mobile, delete.');
   } catch(error) {
     await page.screenshot({path:'test-results/chat-failure.png',fullPage:true});
     throw error;

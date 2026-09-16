@@ -25,7 +25,7 @@ async function api(path, body) {
   return result;
 }
 function paramsURL(params) { return new URLSearchParams(Object.entries(params).filter(([,v]) => v !== '' && v != null)).toString(); }
-function needDataset() { if (!state.dataset) { toast('请先导入并选择一个日志包'); return false; } return true; }
+function needDataset() { if (state.retentionBusy) { toast('正在清理过期索引并释放磁盘空间，请完成后再搜索'); return false; } if (!state.dataset) { toast('请先导入并选择一个日志包'); return false; } return true; }
 function formState(form) {
   const result={};
   for(const element of form.elements) if(element.name||element.id) {
@@ -124,15 +124,18 @@ async function refreshDatasets(selectId) {
     showProgress(status,`正在解析并建立索引：${pending.name}`,`已处理 ${number(p.files)} 个文件 · ${number(p.records)} 条记录 · ${formatBytes(p.bytes)} · ${number(p.records_per_second)} 条/秒${current}`);
   } else if (failed && datasets[0]?.id === failed.id && !selectId) {
     status.hidden = false; status.classList.add('failed'); status.textContent = `导入失败：${failed.name} — ${failed.error}。已有日志包仍可使用。`;
-  } else if (current?.warnings.length) {
+  } else if (current?.warnings?.length) {
     status.hidden = false; status.textContent = '导入提示：' + current.warnings.join('；');
   } else status.hidden = true;
   if (previous !== state.dataset || (state.dataset && !state.files.length)) {
+    state.files = []; updateFilters(); clearResults(); renderFiles();
+    if (previous !== state.dataset && $('#contextDialog').open) $('#contextDialog').close();
     state.files = state.dataset ? await api('/api/files?dataset=' + state.dataset) : [];
     if (serial !== state.refreshSerial) return;
     updateFilters(); clearResults(); renderFiles();
   }
   saveUI();
+  document.dispatchEvent(new CustomEvent('logscope:datasets', {detail: datasets}));
   return datasets;
 }
 function formatBytes(value) {

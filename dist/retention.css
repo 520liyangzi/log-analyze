@@ -1,0 +1,17 @@
+.sidebar{overflow-y:auto}
+.retention-summary{margin-top:16px;padding:12px;border:1px solid #ffffff18;border-radius:8px;background:#ffffff06;font-size:12px;color:#96a8c6;line-height:1.65}
+.retention-summary strong{display:block;font-size:12px;font-weight:600;color:#c2d4f5}
+.retention-summary p{margin:4px 0}.retention-summary small{display:block;font-size:11px;overflow-wrap:anywhere}
+.retention-summary .text-button{margin-top:8px;font-size:12px;color:#a9c5ff;display:flex;justify-content:space-between;align-items:center;width:100%}
+#retainedCount{background:#294065;color:#bacff3;border-radius:10px;padding:0 7px;font-size:11px}
+.retention-notice{padding:13px 17px;border:1px solid #e7d9b9;background:#fff9ec;color:#806326;border-radius:8px;margin-bottom:20px;font-size:13px;line-height:1.8}
+.retention-notice.is-busy{border-color:#c8d9fa;background:#edf4ff;color:#3d5d91}
+.retained-dialog{width:min(800px,calc(100% - 32px))}.retained-explanation{font-size:14px;color:#596f90;line-height:1.8;margin:0 0 18px}
+.retained-list{display:grid;gap:12px;max-height:48vh;overflow-y:auto;padding-right:3px}.retained-card{padding:16px;border:1px solid #dce5f3;border-radius:9px;background:#f9fbff}
+.retained-card-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.retained-card-heading strong{font-size:14px;color:#385275;overflow-wrap:anywhere;min-width:0}
+.retained-badge{background:#edf0f6;color:#677b97;border-radius:5px;padding:3px 6px;white-space:nowrap;font-size:11px}.retained-card p{font-size:12px;color:#7c8da5;line-height:1.7;margin:8px 0}
+.retained-card code{display:block;font:12px/1.6 var(--mono);color:#6c809d;overflow-wrap:anywhere}.retained-download{display:inline-block;margin-top:13px;font-size:13px;color:#3564c9;text-decoration:none}.retained-download:hover{text-decoration:underline}
+.retained-card .retained-missing{margin-top:13px;color:#8d6b31;background:#fff7e8;border:1px solid #eee0c5;border-radius:5px;padding:8px 10px}
+.retained-footnote{color:#8693a9;font-size:12px;line-height:1.8;margin:16px 0 0}#retainedRefreshStatus{font-size:12px;color:#98732c;margin:0 0 12px}
+.retained-empty{padding:32px 16px;text-align:center;background:#f7f9fd;border:1px dashed #d9e2f2;border-radius:9px}.retained-empty strong{font-size:14px;color:#62799d}.retained-empty p{margin:10px 0 0;color:#8694ab;font-size:13px;line-height:1.8}
+@media(max-width:740px){.sidebar{overflow-y:visible}.retention-summary{margin-top:12px;padding:10px 12px}.retention-summary strong,.retention-summary p{display:inline;margin-right:8px}.retention-summary small{margin-top:3px}.retention-summary .text-button{width:auto;gap:12px}.retained-card-heading{flex-wrap:wrap}.retained-dialog .dialog-footer{margin-top:18px}}

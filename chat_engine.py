@@ -14,6 +14,7 @@ import uuid
 from ai_client import Cancelled, ModelClient, ModelConfig
 from analysis_rules import AnalysisRules
 from chat_projects import ChatProjects, query_project
+from index_retention import dataset_lifecycle
 from runtime_paths import RESOURCE_ROOT
 
 
@@ -194,6 +195,7 @@ class ChatManager:
     def tools(task):
         return [t for t in TOOLS if task.get('project') or not t['name'].startswith('project_')]
 
+    @dataset_lifecycle
     def send(self, body):
         request_id = str(body.get('request_id', ''))
         if not request_id or len(request_id) > 100:

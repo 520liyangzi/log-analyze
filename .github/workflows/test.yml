@@ -23,4 +23,6 @@ jobs:
       - run: node --check dist/app.js
       - run: node --check dist/terminal.js
       - run: node --check dist/chat.js
+      - run: node --check dist/retention.js
       - run: python -m py_compile ai_client.py chat_engine.py chat_projects.py
+      - run: python -m py_compile retention.py index_retention.py

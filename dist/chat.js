@@ -49,7 +49,7 @@
     const r=b.result||{}, rows=r.rows||[], code=r.matches||[];
     const total=r.summary?.total;
     const summary=total!=null?`命中 ${number(total)} 条 · 返回 ${number(rows.length)} 条`:r.path?`${r.path} · L${r.start}–${r.end}`:code.length?`返回 ${number(code.length)} 处代码` : r.verified===true?'原文核验一致':r.error?'查询未完成':'';
-    const evidence=rows.slice(0,20).map(row=>`<button class="chat-evidence" data-chat-log="${row.id}">日志 #${row.id} · ${escapeHTML(row.pod||'')} · ${escapeHTML(row.filename||'')} · L${row.line}</button>`).join('');
+    const evidence=rows.slice(0,20).map(row=>`<button class="chat-evidence" data-chat-log="${row.id}" data-chat-dataset="${escapeHTML(row.dataset||current?.task?.dataset||'')}">日志 #${row.id} · ${escapeHTML(row.pod||'')} · ${escapeHTML(row.filename||'')} · L${row.line}</button>`).join('');
     return `<details class="chat-tool"><summary><span class="chat-tool-icon ${b.state}">${b.state==='running'?'◌':b.state==='failed'?'!':'✓'}</span><strong>${escapeHTML(labels[b.name]||b.name)}</strong><span>${escapeHTML(summary)}</span><small>${b.elapsed_ms!=null?`${number(b.elapsed_ms)} ms`:'进行中'}</small></summary><div class="chat-tool-content"><p>查询条件</p><pre>${escapeHTML(JSON.stringify(b.args,null,2))}</pre>${r.truncated||r.has_more?'<p class="chat-truncation">结果未全部展示；需缩小条件或继续查询。不能把当前结果当作全量。</p>':''}<div class="chat-evidence-list">${evidence}</div>${b.result?`<p>返回证据</p><pre>${escapeHTML(JSON.stringify(r,null,2))}</pre>`:''}</div></details>`;
   }
   function renderEvents(events){
@@ -163,7 +163,7 @@
   document.addEventListener('click',async event=>{
     const session=event.target.closest('[data-chat-session]');if(session){await selectSession(session.dataset.chatSession);return;}
     const example=event.target.closest('[data-chat-example]');if(example){$('#chatQuestion').value=example.dataset.chatExample;remember();$('#chatQuestion').focus();}
-    const evidence=event.target.closest('[data-chat-log]');if(evidence){try{await openContext(await api('/api/record?id='+evidence.dataset.chatLog));}catch(e){toast(e.message);}}
+    const evidence=event.target.closest('[data-chat-log]');if(evidence){try{await openContext(await api('/api/record?id='+evidence.dataset.chatLog+'&dataset='+encodeURIComponent(evidence.dataset.chatDataset)));}catch(e){toast(e.message);}}
   });
   let loaded=false;
   document.addEventListener('logscope:view',async event=>{
