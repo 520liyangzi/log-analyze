@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="LogScope 本地多节点日志分析，嵌套压缩包搜索与请求追踪"><title>LogScope · 日志分析工作台</title><link rel="stylesheet" href="/vendor/xterm.css"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/enhancements.css"><script src="/vendor/xterm.js" defer></script><script src="/vendor/addon-fit.js" defer></script><script src="/app.js" defer></script><script src="/terminal.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="LogScope 本地多节点日志分析，嵌套压缩包搜索与请求追踪"><title>LogScope · 日志分析工作台</title><link rel="stylesheet" href="/vendor/xterm.css"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/enhancements.css"><link rel="stylesheet" href="/chat.css"><script src="/vendor/xterm.js" defer></script><script src="/vendor/addon-fit.js" defer></script><script src="/app.js" defer></script><script src="/terminal.js" defer></script><script src="/chat.js" defer></script></head>
 <body>
 <div class="app-shell">
 <aside class="sidebar">
@@ -10,7 +10,8 @@
     <button class="nav active" data-view="search"><span>⌕</span>全局搜索<kbd>1</kbd></button>
     <button class="nav" data-view="trace"><span>⑂</span>流水号追踪<kbd>2</kbd></button>
     <button class="nav" data-view="files"><span>▤</span>日志文件<kbd>3</kbd></button>
-    <button class="nav" data-view="terminal"><span>▸</span>AI 排查<small>本机</small></button>
+    <button class="nav" data-view="chat"><span>✧</span>AI 排查<small>对话</small></button>
+    <button class="nav legacy-nav" data-view="terminal"><span>▸</span>旧版终端</button>
   </nav>
   <div class="side-divider"></div>
   <div class="side-heading">当前日志包<button id="refresh" class="icon-button" aria-label="刷新日志包">↻</button></div>
@@ -20,7 +21,7 @@
   <button id="sideCollect" class="outline wide">⇩ 在线采集日志</button>
   <button id="sideEnvironments" class="outline wide">⚙ 采集环境管理</button>
   <button id="deleteDataset" class="danger-outline wide" disabled>删除当前日志包</button>
-  <div class="side-bottom"><div class="local-badge"><span></span> 本机存储 · 离线搜索</div><p>日志搜索与索引都在本机运行；AI 排查使用你本机已有的 Claude 或公司工具。</p><div class="version">LOGSCOPE <span>v1.20</span></div></div>
+  <div class="side-bottom"><div class="local-badge"><span></span> 本机索引 · 原生 AI 对话</div><p>日志在本机检索；AI 仅接收命中片段，使用维护者配置的共享模型。</p><div class="version">LOGSCOPE <span>v2.0</span></div></div>
 </aside>
 <main>
   <header class="topbar"><div><span class="breadcrumb">工作空间</span><span class="slash">/</span><span id="viewLabel">全局搜索</span></div><span class="quiet">本机离线索引</span></header>
@@ -41,6 +42,23 @@
     </section>
     <section id="traceView" hidden><form id="traceForm" class="search-panel"><div class="search-tabs"><span class="selected">请求时间线</span><span class="subtle">按完整流水号跨节点匹配</span></div><div class="search-main"><span class="search-symbol">⑂</span><input id="traceId" placeholder="输入流水号，例如 9124859898865451127" aria-label="流水号" required><button class="primary">追踪请求 →</button></div><p class="form-note">按日志时间排列所有命中记录；不含流水号的 access 日志，可通过时间与线程另行关联。</p></form><div id="traceResults"></div></section>
     <section id="filesView" hidden><div class="file-toolbar"><h2>日志来源目录</h2><input id="fileSearch" placeholder="筛选 Pod、日志名或压缩包" aria-label="筛选日志文件"></div><div id="fileList"></div></section>
+    <section id="chatView" hidden>
+      <div class="chat-topline"><span class="chat-status-dot"></span><span id="chatCapability">正在检查模型配置…</span><button id="chatRefreshConfig" class="text-button">刷新状态</button><button id="chatRules" class="text-button">分析规则</button></div>
+      <div class="chat-layout">
+        <aside class="chat-sidebar"><div class="chat-sidebar-heading"><strong>排查会话</strong><button id="chatNew" class="primary">＋ 新建</button></div><p>组内共享 · 自动保存 · 最多 3 个并行任务</p><div id="chatSessionList" class="chat-session-list"></div><button id="chatRefresh" class="text-button">刷新会话列表</button></aside>
+        <div class="chat-main">
+          <header class="chat-header"><div><strong id="chatTitle">新建排查</strong><span id="chatScope">使用左侧当前日志包</span></div><div><button id="chatDownload" class="text-button" disabled>导出报告</button><button id="chatDelete" class="text-button chat-danger" disabled>删除</button></div></header>
+          <div id="chatMessages" class="chat-messages" aria-live="polite"><div class="chat-welcome"><div>✧</div><h2>从日志线索，找到问题原因</h2><p>描述接口、时间、流水号或异常现象。AI 会调用已有索引，必要时读取所选分支的局部代码。</p><button data-chat-example="帮我检查当前日志包的异常接口和慢请求，查找关键异常并给出证据。">排查异常与慢请求 ↗</button></div></div>
+          <div id="chatActivity" class="chat-activity" hidden role="status"></div>
+          <div class="chat-compose">
+            <details id="chatProjectOptions"><summary><span>项目代码</span><span id="chatProjectSummary">未启用 · 仅分析日志</span></summary><label class="checkbox"><input type="checkbox" id="chatUseCode"> 结合项目代码分析</label><div id="chatProjectFields" hidden><div class="chat-project-grid"><label>服务电脑上的项目目录<input id="chatProjectPath" autocomplete="off" placeholder="D:\project\mate\FMEMateService"></label><label>远程仓库地址（可选）<input id="chatRemoteUrl" autocomplete="off" placeholder="已有仓库留空使用 origin；新目录填写地址"></label></div><div class="chat-branch-row"><button id="chatSyncProject" class="quiet-action">同步并读取分支</button><select id="chatBranch" aria-label="代码分支" disabled><option value="">先同步项目</option></select></div><p id="chatProjectNote">同步仅 fetch，不 pull、不切换工作区。请选与日志部署版本一致的分支。</p></div></details>
+            <textarea id="chatQuestion" rows="3" maxlength="20000" placeholder="输入问题，或继续追问…" aria-label="排查问题"></textarea>
+            <div class="chat-compose-footer"><label class="checkbox"><input id="chatPreviewEnabled" type="checkbox" checked> 发送前预览任务</label><span>Ctrl + Enter 发送</span><button id="chatStop" class="quiet-action" hidden>停止排查</button><button id="chatSend" class="primary">发送并排查 ↑</button></div>
+            <small>配置由维护者在本机 JSON 中管理；日志和代码片段会发送到配置的模型服务。</small>
+          </div>
+        </div>
+      </div>
+    </section>
     <section id="terminalView" hidden>
       <div class="terminal-setup search-panel">
         <div class="search-tabs"><span class="selected">AI 排查</span><span class="subtle" id="analysisDataset">使用左侧选择的日志包</span><span class="pill blue" id="activeRulesBadge">默认分析规则</span></div>
@@ -83,4 +101,5 @@
 <dialog id="deleteDialog"><div class="dialog-heading"><div><p class="eyebrow">DELETE ARCHIVE</p><h2>删除日志包</h2></div><button type="button" class="icon-button close" aria-label="关闭">×</button></div><div class="danger-notice" id="deleteDatasetInfo"></div><p class="form-note">默认快速删除原始 ZIP、日志记录和索引；数据库中的空闲空间会优先供后续导入复用。data 目录仍会保留应用数据库、AI 会话和配置。</p><div class="delete-option"><label class="checkbox"><input type="checkbox" id="compactAfterDelete"> 立即归还操作系统磁盘空间</label><small>会重写整个数据库；数据库越大越慢，期间可能需要等待数分钟。</small></div><div class="dialog-footer"><button type="button" class="quiet close">取消</button><button type="button" class="danger-button" id="confirmDeleteDataset">确认删除</button></div></dialog>
 <dialog id="contextDialog" class="context-dialog"><div class="dialog-heading"><h2>原文件上下文</h2><button class="icon-button close" aria-label="关闭">×</button></div><p id="contextSource" class="source-path"></p><div id="contextBody"></div></dialog>
 <div id="toast" role="status" hidden></div>
+<dialog id="chatPreviewDialog" class="rules-dialog"><div class="dialog-heading"><div><p class="eyebrow">INVESTIGATION PREVIEW</p><h2>确认本次排查范围</h2></div><button type="button" class="icon-button close" aria-label="关闭">×</button></div><p class="form-note">仅预览，不会调用模型。代码版本已固定；确认后开始查询并保存对话。</p><pre id="chatPreviewText" class="task-preview"></pre><div class="dialog-footer"><span>模型连接地址与 API Key 不会出现在任务中。</span><button id="chatConfirm" class="primary">确认并开始</button></div></dialog>
 </body></html>

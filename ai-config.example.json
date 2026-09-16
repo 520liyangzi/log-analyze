@@ -1,0 +1,13 @@
+{
+  "provider": "openai",
+  "base_url": "https://your-model-gateway.example/v1",
+  "api_key": "replace-with-your-api-key",
+  "model": "replace-with-your-model-name",
+  "stream": true,
+  "timeout_seconds": 120,
+  "max_output_tokens": 4096,
+  "openai_token_parameter": "max_tokens",
+  "max_tool_rounds": 8,
+  "max_context_chars": 100000,
+  "default_project_path": "D:\\project\\mate\\FMEMateService"
+}

@@ -13,7 +13,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save --package-lock=false playwright@1.62.1
+      - run: npx playwright install --with-deps chromium
+      - name: Native chat browser regression with fake local model
+        run: |
+          python tests/chat_browser_server.py &
+          node tests/chat_browser.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-chat-browser
+          path: test-results/
   build:
+    needs: browser
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,6 +71,11 @@ jobs:
               if ($process.HasExited) { throw "LogScope.exe exited with code $($process.ExitCode)" }
             }
             if (-not $ready) { throw 'LogScope.exe did not become ready within 30 seconds' }
+            $capability = Invoke-RestMethod 'http://127.0.0.1:8877/api/chat/capability'
+            if ($capability.configured) { throw 'Fresh executable must not contain model credentials' }
+            if (-not (Test-Path (Join-Path $data 'ai-config.json'))) { throw 'Missing generated AI config' }
+            $chatScript = Invoke-WebRequest 'http://127.0.0.1:8877/chat.js' -UseBasicParsing
+            if ($chatScript.StatusCode -ne 200) { throw 'Missing native chat assets' }
           } finally {
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
           }

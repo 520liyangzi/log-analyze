@@ -18,9 +18,11 @@ import time
 import uuid
 import webbrowser
 import zipfile
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 from collector_environments import CollectorEnvironments
+from chat_engine import ChatManager
 from log_collector import LogCollector
 from runtime_paths import APP_ROOT, FROZEN, RESOURCE_ROOT
 from terminal_bridge import TerminalManager, dimensions
@@ -698,7 +700,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.20'
+    server_version = 'LogScope/2.0'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -724,6 +726,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get('Sec-Fetch-Site') == 'cross-site':
             self.json({'error': '不允许跨站请求'}, 403)
             return False
+        if urlsplit(self.path).path.startswith('/api/terminal/') and self.client_address[0] not in ('127.0.0.1', '::1'):
+            self.json({'error': '旧版 CMD 终端仅在服务电脑使用；共享访问请使用原生 AI 对话。'}, 403)
+            return False
         return True
     def do_GET(self):
         if not self.allowed():
@@ -731,7 +736,17 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         params = {k: v[0] for k, v in parse_qs(parsed.query, keep_blank_values=True).items()}
         try:
-            if parsed.path == '/api/datasets':
+            if parsed.path == '/api/chat/capability':
+                self.json(dict(self.server.chats.config.public(), local_terminal=self.client_address[0] in ('127.0.0.1', '::1')))
+            elif parsed.path == '/api/chat/sessions':
+                self.json(self.server.chats.list())
+            elif parsed.path == '/api/chat/session':
+                self.json(self.server.chats.get(params.get('id', ''), params.get('after', 0)))
+            elif parsed.path == '/api/chat/report':
+                self.json(self.server.chats.report(params.get('id', '')))
+            elif parsed.path == '/api/chat/project-sync':
+                self.json(self.server.chats.projects.status(params.get('id', '')))
+            elif parsed.path == '/api/datasets':
                 self.json(self.store.datasets())
             elif parsed.path == '/api/collector/capability':
                 self.json(self.server.collector.capability())
@@ -786,6 +801,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 routes = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css',
                           '/enhancements.css': 'enhancements.css', '/terminal.js': 'terminal.js',
+                          '/chat.js': 'chat.js', '/chat.css': 'chat.css',
                           '/vendor/xterm.js': 'vendor/xterm.js', '/vendor/xterm.css': 'vendor/xterm.css',
                           '/vendor/addon-fit.js': 'vendor/addon-fit.js'}
                 if parsed.path not in routes:
@@ -837,7 +853,19 @@ class Handler(BaseHTTPRequestHandler):
                 if self.headers.get_content_type() != 'application/json':
                     raise ValueError('需要 application/json 请求')
                 body = json.loads(self.rfile.read(size) or b'{}')
-                if parsed.path == '/api/terminal/config':
+                if not isinstance(body, dict):
+                    raise ValueError('JSON 请求必须是对象')
+                if parsed.path == '/api/chat/preview':
+                    self.json(self.server.chats.preview(body))
+                elif parsed.path == '/api/chat/send':
+                    self.json(self.server.chats.send(body), 202)
+                elif parsed.path == '/api/chat/stop':
+                    self.json(self.server.chats.stop(str(body.get('id', ''))))
+                elif parsed.path == '/api/chat/delete':
+                    self.json(self.server.chats.delete(str(body.get('id', ''))))
+                elif parsed.path == '/api/chat/project-sync':
+                    self.json(self.server.chats.projects.sync(body), 202)
+                elif parsed.path == '/api/terminal/config':
                     self.json(self.server.terminals.save_config(body))
                 elif parsed.path == '/api/collector/start':
                     if body.get('environment_id'):
@@ -867,6 +895,8 @@ class Handler(BaseHTTPRequestHandler):
                     identifier = str(body.get('dataset', ''))
                     if self.server.terminals.dataset_in_use(identifier):
                         raise ValueError('该日志包正在被 AI 终端使用，请先结束对应终端')
+                    if self.server.chats.dataset_in_use(identifier):
+                        raise ValueError('该日志包正在被原生 AI 排查使用，请先停止对应会话')
                     self.store.request_delete(identifier, body.get('compact') is True)
                     self.json({'ok': True, 'id': identifier}, 202)
                 elif parsed.path == '/api/terminal/input':
@@ -896,6 +926,8 @@ class Handler(BaseHTTPRequestHandler):
 
 class LocalServer(ThreadingHTTPServer):
     def server_close(self):
+        if hasattr(self, 'chats'):
+            self.chats.close()
         if hasattr(self, 'collector'):
             self.collector.close()
         if hasattr(self, 'terminals'):
@@ -903,14 +935,23 @@ class LocalServer(ThreadingHTTPServer):
         super().server_close()
 
 
-def make_server(directory, port=8765, collect_script=None):
-    server = LocalServer(('127.0.0.1', port), Handler)
+def make_server(directory, port=8765, collect_script=None, host='127.0.0.1', allowed_hosts=None):
+    server = LocalServer((host, port), Handler)
     server.store = Store(directory)
     port = server.server_address[1]
     server.allowed_hosts = {f'127.0.0.1:{port}', f'localhost:{port}'}
+    if host != '127.0.0.1':
+        names = {host, socket.gethostname()}
+        try:
+            names.update(socket.gethostbyname_ex(socket.gethostname())[2])
+        except OSError:
+            pass
+        names.update(allowed_hosts or [])
+        server.allowed_hosts.update(f'{name}:{port}' for name in names if name != '0.0.0.0')
     server.terminals = TerminalManager(server.store, f'http://127.0.0.1:{port}')
     server.collector_environments = CollectorEnvironments(server.store.directory)
     server.collector = LogCollector(server.store, collect_script or APP_ROOT / 'collect_logs.py')
+    server.chats = ChatManager(server.store)
     return server
 
 
@@ -928,13 +969,17 @@ def main():
         return
     parser = argparse.ArgumentParser(description='LogScope 本地日志分析')
     parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--host', default='127.0.0.1', help='组内共享使用 0.0.0.0；不提供账号隔离，请勿暴露公网')
+    parser.add_argument('--allowed-host', action='append', default=[], help='额外允许的服务 IP 或主机名（不含端口）')
     parser.add_argument('--data', default=str(APP_ROOT / 'data'))
     parser.add_argument('--no-browser', action='store_true', help='启动后不自动打开浏览器')
     args = parser.parse_args()
-    server = make_server(args.data, args.port)
+    server = make_server(args.data, args.port, host=args.host, allowed_hosts=args.allowed_host)
     url = f'http://127.0.0.1:{server.server_address[1]}'
     print(f'LogScope 已启动：{url}', flush=True)
-    print('日志只存储在本机。按 Ctrl+C 停止。', flush=True)
+    print('日志索引保存在本机；AI 会把命中日志和代码发送到你配置的模型服务。按 Ctrl+C 停止。', flush=True)
+    if args.host != '127.0.0.1':
+        print('组内共享模式：无账号和会话隔离，所有同事共用模型配置。请勿暴露到公网。', flush=True)
     if FROZEN and not args.no_browser:
         opener = threading.Timer(0.8, webbrowser.open, args=(url,))
         opener.daemon = True

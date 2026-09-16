@@ -22,3 +22,5 @@ jobs:
           node-version: '22'
       - run: node --check dist/app.js
       - run: node --check dist/terminal.js
+      - run: node --check dist/chat.js
+      - run: python -m py_compile ai_client.py chat_engine.py chat_projects.py

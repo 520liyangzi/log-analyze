@@ -2,7 +2,7 @@
 
 上传外层 ZIP，或者调用本机采集脚本直接下载，搜索全部节点的 `.log` / `.log.gz`，通过接口、Pod、时间、线程和流水号定位请求。中文界面，日志与索引保存在本机。
 
-**Python 3.10+ 即可运行搜索；Windows 网页交互终端需要安装 requirements.txt 中的 pywinpty。无需 Node.js、Java、Docker 或外部数据库。** 前端为原生 HTML/CSS/JavaScript，后端为 Python 标准库 + SQLite；搜索和索引可断网运行，本机 AI 使用它自己的网络与模型配置。
+**Python 3.10+ 即可运行搜索和原生 AI 对话；旧版 Windows 网页终端需要 pywinpty。无需 Node.js、Java、Docker 或外部数据库。** 搜索和索引可断网运行；原生 AI 使用维护者在 `data/ai-config.json` 配置的模型 API，界面不显示地址或 API Key。
 
 ## 1. Windows 启动
 
@@ -51,11 +51,24 @@ python collect_logs.py --pod xxxx --start "2026-09-10 14:00:00" --end "2026-09-1
 
 页面会为每次任务传入独立的 `--output` 临时目录。脚本成功后，LogScope 从目录中选择最新生成的 ZIP，校验格式并自动导入、建立索引，随后切换到该日志包。点击 **环境管理** 可保存多套平台地址、用户名和密码；在线采集时选择环境会自动回填地址与用户名，并由本机服务直接使用保存的密码，密码不会回显到浏览器。环境保存在 `data/collector-environments.json`，请像保护日志和 AI 会话一样保护整个 `data/` 目录。也可以选择“手动填写本次连接”。无头模式、超时、轮询和日志解析参数仍在高级设置中。
 
-## AI 排查：填问题，开始分析
+## AI 排查：原生对话（推荐）
+
+v2.0 已内置直接连接模型的聊天界面，不需要 Claude / codeagent 命令或外部 Session ID。
+
+1. 启动后编辑自动生成的 `data/ai-config.json`，填写 `base_url`、`api_key`、`model`。完整示例见 [ai-config.example.json](ai-config.example.json)。
+2. 选择日志包 → **AI 排查** → 输入问题 → 预览任务 → 确认发送。
+3. 页面逐步显示回答与真实工具查询记录，可展开条件/证据、继续追问、停止、切换会话、删除和导出报告。所有对话自动保存，刷新不丢失。
+4. 可选结合代码：默认服务电脑目录 `D:\project\mate\FMEMateService`，同步远程后选分支；每次任务固定 commit，只读代码，不 pull、不切换工作区。
+
+支持 OpenAI-compatible Chat Completions 和 Anthropic Messages 格式。模型需支持工具调用；API 地址/密钥不回显到浏览器。按当前需求，组内共用配置和会话，不做登录隔离；用 `LogScope.exe --host 0.0.0.0` 或 `python app.py --host 0.0.0.0` 开启组内访问，不要暴露公网。
+
+详细配置、使用、共享启动和问题排查见 [原生 AI 对话指南](docs/NATIVE_AI.md)。
+
+## 旧版 CMD / Agent 终端（保留）
 
 页面内置真实交互终端：Windows 使用 CMD + ConPTY，Linux/macOS 使用 PTY Shell。支持输入、方向键、权限确认、后续追问和 Ctrl+C，全部在页面里完成。
 
-1. 上传并选择日志包，点击左侧 **AI 排查**。
+1. 上传并选择日志包，在服务电脑点击左侧 **旧版终端**。
 2. 第一次展开 **启动设置**：默认命令为 `codeagent --dangerously-skip-permissions`，默认“自动传入任务”；仍可改成其他本机 AI 命令。如果命令不支持启动时接收问题，选择“兼容模式”。
 3. 填写问题（也可点击示例），点击 **生成任务并预览**。页面先展示最终 `task.md`，只有再次点击 **确认并启动 AI** 才会启动命令。
    - 可在问题下方选择本机 Git 项目和分支。选择后，预览会固定当前 commit；AI 先查日志，再根据日志中的接口、类名、方法和错误信息自行判断是否需要查代码。
@@ -77,7 +90,7 @@ python collect_logs.py --pod xxxx --start "2026-09-10 14:00:00" --end "2026-09-1
 
 Skill 仍可选安装，作为外部 AI 发现查询工具的入口；分析流程统一从页面维护。日志解析格式变化仍需修改解析器，不会因为更新提示词自动修正旧索引。
 
-升级到 v1.20：EXE 用户关闭旧窗口后从 `exe` 分支或 Release 替换 `LogScope.exe`；源码用户停止旧服务 → `git pull` → `python -m pip install -r requirements.txt` → `python app.py` → 刷新页面。**已有日志不必重新导入，搜索、AI 配置和历史任务都不受影响。** 本版为 ZIP 上传、平台采集、索引构建和日志包删除增加统一进度展示：上传显示真实百分比，平台等待与索引阶段显示动态进度及已等待时间、文件数、记录数、读取量和处理速度。平台和压缩包没有提供最终总量时，不显示虚假的百分比。EXE 只发布到独立的 `exe` 分支和 Release，`main` 保持纯源码。
+升级到 v2.0：EXE 用户关闭旧程序后从 `exe` 分支或 Release 替换 `LogScope.exe`；源码用户停止旧服务 → `git pull` → `python -m pip install -r requirements.txt` → `python app.py` → 刷新页面。**已有日志不必重新导入，旧终端历史保留。** 新增原生聊天、文件式模型配置、只读工具循环、Git 同步与组内共享启动。原生对话首次使用需填写 `data/ai-config.json`；不会复用或提取 CLI 登录凭据。EXE 只发布到独立的 `exe` 分支和 Release，`main` 保持纯源码。
 
 旧日志包仍按原索引正常搜索，不会在启动时自动重建。若要让旧包也获得空间与导入格式优化，需要升级后在页面删除该日志包，再用保留的原始 ZIP 重新上传，或重新在线采集一次；仅重启程序不会缩小旧数据库。三字符以上的任意关键词、中文、接口、`%` / `_` 等字面搜索行为保持不变。
 
@@ -196,11 +209,12 @@ access 格式支持普通双引号和反斜杠转义双引号：
 
 ## 6. 数据、限制与维护
 
-默认只监听 `127.0.0.1`，供本机单人使用，不是公网多人服务。Host / Origin 校验限制第三方网页读取本地 API。无第三方 CDN 或前端遥测。
+默认只监听 `127.0.0.1`。可用 `--host 0.0.0.0` 开启可信组内共享，无登录或会话隔离，不适合公网。Host / Origin 校验保留。无第三方 CDN 或前端遥测。原生 AI 会将命中的日志/代码片段发送到配置的模型服务，请使用公司允许的接口。
 
 - 数据位置：`data/logs.sqlite3` 及 SQLite 伴随文件；重启保留导入记录。原 ZIP 位于 `data/archives/`，因此会额外占用压缩包大小的磁盘空间。压缩包显示的 50 MB 不是解压后日志大小；数据库还要保存每条记录的解析字段与三元全文检索结构，因此一定会大于原 ZIP。v1.14 已避免索引再次复制整段原文并移除词位明细，同时将导入缓存和 WAL 控制在固定范围内。
 - 删除某个日志包只会删除该包的原 ZIP、日志记录和索引，不会删除整个 `data/` 目录。`logs.sqlite3` 仍是应用数据库容器，目录中还可能有 AI 会话、分析规则、终端配置和采集工作目录；即使没有日志包，这些文件或目录也会保留。
 - 分析规则：`data/analysis-rules.json` 保存本机自定义流程、业务规则及全部历史版本。`data/terminal-config.json` 保存启动命令与传入方式，`data/collector-environments.json` 保存采集环境及密码。
+- 原生 AI：`data/ai-config.json` 保存共享模型配置（含密钥，不回显）；`data/chat.sqlite3` 保存会话和工具证据；`data/chat-sessions/<id>/` 保存任务与最新报告。组内会话共享，不做用户隔离。
 - 终端任务：`data/terminal-sessions/<id>/` 存放任务、规则快照、查询工具、`session.json`、`terminal.log` 和 Agent 报告。页面加载最近约 2 MB 输出，完整终端输出文件持续落盘；不要在终端输入不应保存的明文秘密。Agent 自己的聊天记录仍由其配置决定。
 - 大日志包会同时占用保存的原始 ZIP 与 SQLite/FTS 索引空间。导入采用流式读取，v1.4 减少了每条记录一次多余的数据库写入；实际耗时仍取决于压缩后大小、解压后行数和磁盘速度。
 - 更换目录：`python app.py --data D:\logscope-data`。
