@@ -8,13 +8,13 @@
 
 ### 推荐：直接使用 EXE
 
-执行 `git pull` 后可以直接使用仓库根目录的 `LogScope.exe`；也可以从 [Windows 最新版发布页](https://github.com/520liyangzi/log-analyze/releases/tag/windows-latest) 单独下载。把它放到固定目录后双击，程序会自动打开浏览器；日志索引、原始 ZIP、规则和 AI 会话保存在 EXE 同目录的 `data/`，以后只替换 EXE 不会覆盖这些数据。
+从独立的 [`exe` 分支](https://github.com/520liyangzi/log-analyze/tree/exe)或 [Windows 最新版发布页](https://github.com/520liyangzi/log-analyze/releases/tag/windows-latest) 下载 `LogScope.exe`。把它放到固定目录后双击，程序会自动打开浏览器；日志索引、原始 ZIP、规则和 AI 会话保存在 EXE 同目录的 `data/`，以后只替换 EXE 不会覆盖这些数据。
 
 `LogScope.exe` 已内置网页、提示词、日志查询和代码查询工具，搜索及 AI 排查不需要另装 Python。首次启动可能被 Windows SmartScreen 提示，因为当前 EXE 没有商业代码签名；可以用发布页同时提供的 `LogScope.exe.sha256` 核对文件。
 
 在线采集是一个例外：`collect_logs.py` 是你的私有外部脚本，且它依赖什么第三方包目前无法从仓库得知，因此使用在线采集时仍需把脚本放在 EXE 同目录，并保留它原本可用的 Python 与依赖环境。上传 ZIP、搜索、流水号、删除日志包和 AI 排查不受此限制。
 
-每次 `main` 分支更新后，GitHub 会在 Windows 上自动测试源码、构建单文件 EXE、真正启动并访问首页，全部通过后覆盖发布页里的最新版，并把成品同步到仓库根目录。每个构建也会作为该次工作流的 Artifact 保留。
+每次 `main` 分支更新后，GitHub 会在 Windows 上自动测试源码、构建单文件 EXE、真正启动并访问首页，全部通过后覆盖发布页里的最新版，并把成品同步到独立的 `exe` 分支。`main` 只保留源码，每个构建也会作为该次工作流的 Artifact 保留。
 
 ### 使用源码
 
@@ -49,14 +49,14 @@ python3 app.py
 python collect_logs.py --pod xxxx --start "2026-09-10 14:00:00" --end "2026-09-10 16:30:00"
 ```
 
-页面会为每次任务传入独立的 `--output` 临时目录。脚本成功后，LogScope 从目录中选择最新生成的 ZIP，校验格式并自动导入、建立索引，随后切换到该日志包。平台地址、用户名、密码为每次采集必填项，位于基础设置；平台地址和用户名保留上次输入，密码只用于本次子进程参数，不保存到浏览器历史或 LogScope 配置。无头模式、超时、轮询和日志解析参数仍在高级设置中，留空时使用脚本默认值。
+页面会为每次任务传入独立的 `--output` 临时目录。脚本成功后，LogScope 从目录中选择最新生成的 ZIP，校验格式并自动导入、建立索引，随后切换到该日志包。点击 **环境管理** 可保存多套平台地址、用户名和密码；在线采集时选择环境会自动回填地址与用户名，并由本机服务直接使用保存的密码，密码不会回显到浏览器。环境保存在 `data/collector-environments.json`，请像保护日志和 AI 会话一样保护整个 `data/` 目录。也可以选择“手动填写本次连接”。无头模式、超时、轮询和日志解析参数仍在高级设置中。
 
 ## AI 排查：填问题，开始分析
 
 页面内置真实交互终端：Windows 使用 CMD + ConPTY，Linux/macOS 使用 PTY Shell。支持输入、方向键、权限确认、后续追问和 Ctrl+C，全部在页面里完成。
 
 1. 上传并选择日志包，点击左侧 **AI 排查**。
-2. 第一次展开 **启动设置**：默认命令 `claude`，公司版直接改为你的启动命令并保存。默认“自动传入任务”；如果公司命令不支持启动时接收问题，选择“兼容模式”。
+2. 第一次展开 **启动设置**：默认命令为 `codeagent --dangerously-skip-permissions`，默认“自动传入任务”；仍可改成其他本机 AI 命令。如果命令不支持启动时接收问题，选择“兼容模式”。
 3. 填写问题（也可点击示例），点击 **生成任务并预览**。页面先展示最终 `task.md`，只有再次点击 **确认并启动 AI** 才会启动命令。
    - 可在问题下方选择本机 Git 项目和分支。选择后，预览会固定当前 commit；AI 先查日志，再根据日志中的接口、类名、方法和错误信息自行判断是否需要查代码。
 4. 在终端完成 AI 自身的登录、工作目录信任或工具权限确认。兼容模式下，等 AI 进入对话界面再点击 **AI 就绪后发送任务**。
@@ -77,7 +77,7 @@ python collect_logs.py --pod xxxx --start "2026-09-10 14:00:00" --end "2026-09-1
 
 Skill 仍可选安装，作为外部 AI 发现查询工具的入口；分析流程统一从页面维护。日志解析格式变化仍需修改解析器，不会因为更新提示词自动修正旧索引。
 
-升级到 v1.18：EXE 用户关闭旧窗口后直接替换 `LogScope.exe`；源码用户停止旧服务 → `git pull` → `python -m pip install -r requirements.txt` → `python app.py` → 刷新页面。**已有日志不必重新导入，搜索、AI 配置和历史任务都不受影响。** v1.18 新增经 Windows 启动校验的单文件 EXE，且 EXE 内置 AI 日志/代码查询工具。新导入继续采用批量写入、受控 WAL 和紧凑全文索引；v1.17 将删除改为默认快速模式，不再为删除一个包而重写整个数据库；确实需要让 `logs.sqlite3` 立即缩小时，可在删除弹窗勾选“立即归还操作系统磁盘空间”。
+升级到 v1.19：EXE 用户关闭旧窗口后从 `exe` 分支或 Release 替换 `LogScope.exe`；源码用户停止旧服务 → `git pull` → `python -m pip install -r requirements.txt` → `python app.py` → 刷新页面。**已有日志不必重新导入，搜索、AI 配置和历史任务都不受影响。** 本版新增采集环境管理，将默认 AI 命令改为 `codeagent --dangerously-skip-permissions`，并修复 Windows CMD 被错误声明为 xterm 后出现的 `clear` 报错、颜色查询文本和混乱重绘。EXE 改为只发布到独立的 `exe` 分支和 Release，`main` 保持纯源码。
 
 旧日志包仍按原索引正常搜索，不会在启动时自动重建。若要让旧包也获得空间与导入格式优化，需要升级后在页面删除该日志包，再用保留的原始 ZIP 重新上传，或重新在线采集一次；仅重启程序不会缩小旧数据库。三字符以上的任意关键词、中文、接口、`%` / `_` 等字面搜索行为保持不变。
 
@@ -200,7 +200,7 @@ access 格式支持普通双引号和反斜杠转义双引号：
 
 - 数据位置：`data/logs.sqlite3` 及 SQLite 伴随文件；重启保留导入记录。原 ZIP 位于 `data/archives/`，因此会额外占用压缩包大小的磁盘空间。压缩包显示的 50 MB 不是解压后日志大小；数据库还要保存每条记录的解析字段与三元全文检索结构，因此一定会大于原 ZIP。v1.14 已避免索引再次复制整段原文并移除词位明细，同时将导入缓存和 WAL 控制在固定范围内。
 - 删除某个日志包只会删除该包的原 ZIP、日志记录和索引，不会删除整个 `data/` 目录。`logs.sqlite3` 仍是应用数据库容器，目录中还可能有 AI 会话、分析规则、终端配置和采集工作目录；即使没有日志包，这些文件或目录也会保留。
-- 分析规则：`data/analysis-rules.json` 保存本机自定义流程、业务规则及全部历史版本。`data/terminal-config.json` 保存启动命令与传入方式。
+- 分析规则：`data/analysis-rules.json` 保存本机自定义流程、业务规则及全部历史版本。`data/terminal-config.json` 保存启动命令与传入方式，`data/collector-environments.json` 保存采集环境及密码。
 - 终端任务：`data/terminal-sessions/<id>/` 存放任务、规则快照、查询工具、`session.json`、`terminal.log` 和 Agent 报告。页面加载最近约 2 MB 输出，完整终端输出文件持续落盘；不要在终端输入不应保存的明文秘密。Agent 自己的聊天记录仍由其配置决定。
 - 大日志包会同时占用保存的原始 ZIP 与 SQLite/FTS 索引空间。导入采用流式读取，v1.4 减少了每条记录一次多余的数据库写入；实际耗时仍取决于压缩后大小、解压后行数和磁盘速度。
 - 更换目录：`python app.py --data D:\logscope-data`。

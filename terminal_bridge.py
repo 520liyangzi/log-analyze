@@ -19,6 +19,7 @@ from runtime_paths import FROZEN, RESOURCE_ROOT, SOURCE_ROOT
 
 TASK_PROMPT = 'Read task.md in the current directory. Use its rules and query tools to investigate the question. Reply in Chinese and write report.md.'
 DEFAULT_RESUME_TEMPLATE = '{command} --sessions {session_id}'
+DEFAULT_COMMAND = 'codeagent --dangerously-skip-permissions'
 SESSION_ID_RE = re.compile(r'(?i)(?:\bsessions?(?:\s*id)?|--sessions?|--resume)\s*[:=]?\s*([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\b')
 
 
@@ -27,6 +28,18 @@ def bundled_tool_command(name):
     if FROZEN:
         return f'{executable} --run-tool {name}'
     return f'{executable} tools/{name}.py'
+
+
+def terminal_environment(url, dataset):
+    env = dict(os.environ, PYTHONIOENCODING='utf-8', LOGSCOPE_URL=url, LOGSCOPE_DATASET_ID=dataset)
+    if os.name == 'nt':
+        # Pretending CMD is an xterm makes some Agent CLIs run Unix `clear` and
+        # feed color-query replies back to CMD as visible commands.
+        env.pop('TERM', None)
+        env.pop('COLORTERM', None)
+    else:
+        env.update(TERM='xterm-256color', COLORTERM='truecolor')
+    return env
 
 
 def dimensions(cols, rows):
@@ -320,8 +333,11 @@ class TerminalManager:
         self.rules = AnalysisRules(store.directory)
 
     def config(self):
-        config = json.loads(self.config_file.read_text('utf-8')) if self.config_file.exists() else {'command': 'claude'}
-        config.setdefault('launch_mode', 'argument' if config.get('command') == 'claude' else 'manual')
+        config = json.loads(self.config_file.read_text('utf-8')) if self.config_file.exists() else {
+            'command': DEFAULT_COMMAND, 'launch_mode': 'argument'}
+        if config.get('command') == 'claude':
+            config.update(command=DEFAULT_COMMAND, launch_mode='argument')
+        config.setdefault('launch_mode', 'argument' if config.get('command') in ('claude', DEFAULT_COMMAND) else 'manual')
         config.setdefault('resume_template', DEFAULT_RESUME_TEMPLATE)
         available, reason = True, ''
         if os.name == 'nt':
@@ -410,8 +426,7 @@ class TerminalManager:
             if task.get('project'):
                 atomic_json(directory / 'code-task.json', task['project'])
             (directory / 'CLAUDE.md').write_text('本目录用于 LogScope 日志排查。先读取 task.md，按其中的问题和规则调用 tools/logscope.py；任务包含项目时可按需调用 tools/project.py。\n', 'utf-8')
-            env = dict(os.environ, TERM='xterm-256color', COLORTERM='truecolor', PYTHONIOENCODING='utf-8',
-                       LOGSCOPE_URL=self.url, LOGSCOPE_DATASET_ID=dataset)
+            env = terminal_environment(self.url, dataset)
             pty = WindowsPTY(directory, env, cols, rows) if os.name == 'nt' else UnixPTY(directory, env, cols, rows)
             command = config['command'] if body.get('run_command', True) else ''
             mode = config['launch_mode'] if command else 'manual'
@@ -493,8 +508,7 @@ class TerminalManager:
             info = self.saved_info(identifier)
             ai_session_id = self.validate_ai_session_id(body.get('ai_session_id') or info.get('ai_session_id'))
             task = json.loads((directory / 'task.json').read_text('utf-8'))
-            env = dict(os.environ, TERM='xterm-256color', COLORTERM='truecolor', PYTHONIOENCODING='utf-8',
-                       LOGSCOPE_URL=self.url, LOGSCOPE_DATASET_ID=task.get('dataset', ''))
+            env = terminal_environment(self.url, task.get('dataset', ''))
             pty = WindowsPTY(directory, env, cols, rows) if os.name == 'nt' else UnixPTY(directory, env, cols, rows)
             session = Session(identifier, directory, task.get('dataset', ''), config['command'], pty, task,
                               info.get('launch_mode', config['launch_mode']), ai_session_id, info.get('created', ''),

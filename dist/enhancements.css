@@ -3,10 +3,25 @@ button.is-loading:disabled { cursor: wait; }
 .page-actions { display: flex; align-items: center; gap: 10px; }
 .quiet-action { border: 1px solid #cad7eb; border-radius: 7px; padding: 10px 15px; color: #365b91; background: #fff; font-size: .85rem; }
 .quiet-action:hover { border-color: #8caae0; background: #f5f8ff; }
-#sideCollect { margin-top: 9px; }
+#sideCollect, #sideEnvironments { margin-top: 9px; }
 .collection-status { border-color: #a9cbed; background: #f0f7ff; }
 .collection-status.failed { border-color: #f5c6cd; background: #fff0f1; }
 .collect-dialog { width: min(820px, calc(100% - 32px)); }
+.collect-environment-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; align-items:end; margin:0 24px 18px; }
+.collect-environment-row button { height:42px; border:1px solid var(--border); border-radius:7px; padding:0 14px; }
+.environment-dialog { width:min(900px,calc(100% - 32px)); }
+.environment-layout { display:grid; grid-template-columns:minmax(240px,.9fr) minmax(320px,1.4fr); gap:24px; }
+.environment-list-heading { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+.environment-list { border:1px solid var(--border); border-radius:9px; min-height:280px; max-height:440px; overflow:auto; padding:8px; }
+.environment-list>.subtle { display:block; padding:18px; }
+.environment-item { display:flex; width:100%; flex-direction:column; align-items:flex-start; gap:5px; padding:12px; border-radius:7px; text-align:left; }
+.environment-item:hover { background:#edf3ff; }
+.environment-item span,.environment-item small { max-width:100%; overflow-wrap:anywhere; color:var(--muted); }
+#environmentForm { border-left:1px solid var(--border); padding-left:24px; }
+#environmentForm label+label { margin-top:15px; }
+#environmentForm .form-note { margin:14px 0; }
+.environment-actions { display:flex; justify-content:flex-end; gap:12px; margin-top:20px; }
+@media(max-width:740px){.collect-environment-row{grid-template-columns:1fr;margin-inline:0}.environment-layout{grid-template-columns:1fr}.environment-list{min-height:160px;max-height:240px}#environmentForm{border-left:0;border-top:1px solid var(--border);padding:20px 0 0}}
 .collect-note { margin: -8px 0 20px; }
 .collect-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .collect-grid label { font-size: .82rem; }

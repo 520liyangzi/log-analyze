@@ -418,6 +418,7 @@
     }catch(e){notice(e.message);toast(e.message);}
   });
   $('#toggleFullscreen').addEventListener('click',()=>{$('#terminalWorkspace').classList.toggle('fullscreen');fit?.fit();term?.focus();});
+  $('#clearTerminalDisplay').addEventListener('click',()=>{initialize();term.reset();term.focus();notice('仅清空当前页面显示；完整终端记录和 AI 会话仍然保留。');});
   $('#copySelection').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(term?.getSelection()||'');toast('已复制选中内容');}catch{toast('请使用 Ctrl+Shift+C 复制选中内容');}});
   $('#pasteTerminal').addEventListener('click',async()=>{try{const text=await navigator.clipboard.readText();term.paste(text);term.focus();}catch{toast('请在终端中使用 Ctrl+Shift+V 粘贴');}});
   $('#refreshReport').addEventListener('click',()=>loadReport());

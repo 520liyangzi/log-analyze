@@ -203,9 +203,12 @@ print('download complete password=' + str(a.password),flush=True)
                     with self.assertRaises(HTTPError) as error:
                         api('/api/collector/start',body)
                     self.assertEqual(error.exception.code,400)
-                job=api('/api/collector/start',dict(pod='order;touch hacked',start='2026-09-10 14:00:00',
-                                                     end='2026-09-10 16:30:00',url='https://logs.example.test',
-                                                     user='admin',password='test secret'))
+                environment=api('/api/collector/environments',dict(name='测试环境',url='https://logs.example.test',
+                                                                    user='admin',password='test secret'))
+                self.assertNotIn('password',environment)
+                self.assertNotIn('password',api('/api/collector/environments')[0])
+                job=api('/api/collector/start',dict(environment_id=environment['id'],pod='order;touch hacked',
+                                                     start='2026-09-10 14:00:00',end='2026-09-10 16:30:00'))
                 deadline=time.monotonic()+15
                 while time.monotonic()<deadline:
                     job=api('/api/collector/status?id='+job['id'])

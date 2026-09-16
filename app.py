@@ -20,6 +20,7 @@ import webbrowser
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
+from collector_environments import CollectorEnvironments
 from log_collector import LogCollector
 from runtime_paths import APP_ROOT, FROZEN, RESOURCE_ROOT
 from terminal_bridge import TerminalManager, dimensions
@@ -697,7 +698,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/1.18'
+    server_version = 'LogScope/1.19'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -736,6 +737,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(self.server.collector.capability())
             elif parsed.path == '/api/collector/status':
                 self.json(self.server.collector.status(params.get('id', '')))
+            elif parsed.path == '/api/collector/environments':
+                self.json(self.server.collector_environments.list())
             elif parsed.path == '/api/files':
                 self.json(self.store.filters(params.get('dataset', '')))
             elif parsed.path == '/api/search':
@@ -837,7 +840,13 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.path == '/api/terminal/config':
                     self.json(self.server.terminals.save_config(body))
                 elif parsed.path == '/api/collector/start':
+                    if body.get('environment_id'):
+                        body.update(self.server.collector_environments.resolve(body['environment_id']))
                     self.json(self.server.collector.start(body), 202)
+                elif parsed.path == '/api/collector/environments':
+                    self.json(self.server.collector_environments.save(body))
+                elif parsed.path == '/api/collector/environments/delete':
+                    self.json(self.server.collector_environments.delete(body.get('id', '')))
                 elif parsed.path == '/api/analysis/rules':
                     self.json(self.server.terminals.rules.save(body))
                 elif parsed.path == '/api/terminal/preview':
@@ -900,6 +909,7 @@ def make_server(directory, port=8765, collect_script=None):
     port = server.server_address[1]
     server.allowed_hosts = {f'127.0.0.1:{port}', f'localhost:{port}'}
     server.terminals = TerminalManager(server.store, f'http://127.0.0.1:{port}')
+    server.collector_environments = CollectorEnvironments(server.store.directory)
     server.collector = LogCollector(server.store, collect_script or APP_ROOT / 'collect_logs.py')
     return server
 

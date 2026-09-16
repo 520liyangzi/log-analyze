@@ -8,6 +8,7 @@ const COLLECT_JOB_KEY = 'logscope.collector.job';
 let savedUI={};
 try { savedUI=JSON.parse(localStorage.getItem(UI_STATE_KEY)||'{}'); } catch {}
 const state = { dataset: savedUI.dataset || '', datasets: [], files: [], view: 'search', page: 1, tracePage: 1, lastSearch: null, lastTrace: null, rows: new Map(), searchSerial: 0, traceSerial: 0, refreshSerial: 0, correlation: null, collectionSerial: 0 };
+let collectorEnvironments=[];
 let toastTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 4500); }
 async function api(path, body) {
@@ -30,7 +31,7 @@ function formState(form) {
 function saveUI() {
   const value={dataset:state.dataset,view:state.view,search:formState($('#searchForm')),
     advanced:$('#advanced').open,trace:$('#traceId').value,fileSearch:$('#fileSearch').value,
-    collector:{pod:$('#collectPod').value,start:$('#collectStart').value,end:$('#collectEnd').value,
+    collector:{environment:$('#collectEnvironment').value,pod:$('#collectPod').value,start:$('#collectStart').value,end:$('#collectEnd').value,
       url:$('#collectUrl').value,user:$('#collectUser').value,headless:$('#collectHeadless').value,
       timeout:$('#collectTimeout').value,poll:$('#collectPoll').value,encoding:$('#collectEncoding').value,
       offset:$('#collectOffset').value,unit:$('#collectUnit').value}};
@@ -239,9 +240,39 @@ async function openContext(row) {
   } catch(error) { $('#contextBody').textContent=error.message; }
 }
 function openUpload() { $('#uploadDialog').showModal(); }
+function selectedCollectorEnvironment(){return collectorEnvironments.find(item=>item.id===$('#collectEnvironment').value);}
+function applyCollectorEnvironment(){
+  const item=selectedCollectorEnvironment(),locked=Boolean(item);
+  if(item){$('#collectUrl').value=item.url;$('#collectUser').value=item.user;$('#collectPassword').value='';}
+  for(const id of ['collectUrl','collectUser','collectPassword'])$('#'+id).disabled=locked;
+  $('#collectPassword').required=!locked;
+  $('#collectPassword').placeholder=locked?'已保存，采集时由本机服务安全读取':'请输入平台密码';
+  saveUI();
+}
+async function loadCollectorEnvironments(preferred){
+  collectorEnvironments=await api('/api/collector/environments');
+  const select=$('#collectEnvironment'),current=preferred!==undefined?preferred:select.value;
+  select.innerHTML='<option value="">手动填写本次连接</option>'+collectorEnvironments.map(item=>`<option value="${item.id}">${escapeHTML(item.name)} · ${escapeHTML(item.user)}</option>`).join('');
+  select.value=collectorEnvironments.some(item=>item.id===current)?current:'';applyCollectorEnvironment();
+  return collectorEnvironments;
+}
+function editEnvironment(item){
+  $('#environmentId').value=item?.id||'';$('#environmentName').value=item?.name||'';
+  $('#environmentUrl').value=item?.url||'';$('#environmentUser').value=item?.user||'';$('#environmentPassword').value='';
+  $('#environmentPassword').required=!item;$('#deleteEnvironment').hidden=!item;
+  $('#environmentName').focus();
+}
+function renderEnvironmentList(){
+  $('#environmentList').innerHTML=collectorEnvironments.length?collectorEnvironments.map(item=>`<button type="button" class="environment-item" data-environment-id="${item.id}"><strong>${escapeHTML(item.name)}</strong><span>${escapeHTML(item.url)}</span><small>${escapeHTML(item.user)} · ${item.has_password?'密码已保存':'无密码'}</small></button>`).join(''):'<p class="subtle">还没有环境，点击右上角新增。</p>';
+}
+async function openEnvironmentManager(){
+  try{await loadCollectorEnvironments();renderEnvironmentList();editEnvironment(null);$('#environmentDialog').showModal();}
+  catch(error){toast(error.message);}
+}
 async function openCollector() {
   $('#collectDialog').showModal();
   try{
+    await loadCollectorEnvironments(savedUI.collector?.environment||$('#collectEnvironment').value);
     const capability=await api('/api/collector/capability');
     $('#collectorCapability').textContent=capability.available
       ? `${capability.script} 已就绪；下载成功后自动导入并建立索引。`
@@ -273,7 +304,7 @@ async function pollCollection(identifier){
 async function startCollection(){
   const button=$('#collectSubmit');button.disabled=true;button.classList.add('is-loading');button.textContent='正在启动…';
   try{
-    const result=await api('/api/collector/start',{pod:$('#collectPod').value,start:$('#collectStart').value,end:$('#collectEnd').value,
+    const result=await api('/api/collector/start',{environment_id:$('#collectEnvironment').value,pod:$('#collectPod').value,start:$('#collectStart').value,end:$('#collectEnd').value,
       url:$('#collectUrl').value,user:$('#collectUser').value,password:$('#collectPassword').value,headless:$('#collectHeadless').value,
       timeout:$('#collectTimeout').value,poll:$('#collectPoll').value,encoding:$('#collectEncoding').value,
       offset:$('#collectOffset').value,unit:$('#collectUnit').value});
@@ -322,6 +353,22 @@ $('#dropzone').addEventListener('dragleave',()=>$('#dropzone').classList.remove(
 $('#dropzone').addEventListener('drop',e=>{e.preventDefault();$('#dropzone').classList.remove('dragging');chooseFile(e.dataTransfer.files[0]);$('#uploadFile').required=false;});
 $('#uploadForm').addEventListener('submit',e=>{e.preventDefault();upload(selectedFile);});
 $('#collectForm').addEventListener('submit',e=>{e.preventDefault();startCollection();});
+$('#collectEnvironment').addEventListener('change',applyCollectorEnvironment);
+for(const id of ['sideEnvironments','topEnvironments','manageEnvironmentsFromCollect'])$('#'+id).addEventListener('click',()=>{if(id==='manageEnvironmentsFromCollect')$('#collectDialog').close();openEnvironmentManager();});
+$('#newEnvironment').addEventListener('click',()=>editEnvironment(null));
+$('#environmentList').addEventListener('click',event=>{const button=event.target.closest('[data-environment-id]');if(button)editEnvironment(collectorEnvironments.find(item=>item.id===button.dataset.environmentId));});
+$('#environmentForm').addEventListener('submit',async event=>{
+  event.preventDefault();
+  try{
+    const saved=await api('/api/collector/environments',{id:$('#environmentId').value,name:$('#environmentName').value,url:$('#environmentUrl').value,user:$('#environmentUser').value,password:$('#environmentPassword').value});
+    await loadCollectorEnvironments(saved.id);renderEnvironmentList();editEnvironment(saved);toast('采集环境已保存');
+  }catch(error){toast(error.message);}
+});
+$('#deleteEnvironment').addEventListener('click',async()=>{
+  const id=$('#environmentId').value;if(!id||!confirm('确定删除这个采集环境吗？'))return;
+  try{await api('/api/collector/environments/delete',{id});await loadCollectorEnvironments();renderEnvironmentList();editEnvironment(null);toast('采集环境已删除');}
+  catch(error){toast(error.message);}
+});
 $('#searchForm').addEventListener('submit',e=>{e.preventDefault();runSearch();});
 $('#traceForm').addEventListener('submit',e=>{e.preventDefault();runTrace();});
 $('#dataset').addEventListener('change',async()=>{state.dataset=$('#dataset').value;state.files=[];saveUI();try{await refreshDatasets(state.dataset);}catch(error){toast(error.message);}});
