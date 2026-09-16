@@ -1,7 +1,9 @@
 """Small model transport. Credentials never enter chat state or browser responses."""
 import http.client
+import io
 import json
-import socket
+import select
+import ssl
 import threading
 import time
 from urllib.parse import urlsplit
@@ -26,6 +28,55 @@ DEFAULT_CONFIG = {
 
 class Cancelled(Exception):
     pass
+
+
+class _ResponseReader(io.RawIOBase):
+    """Cancellable reads, including silent TLS streams and HTTP/1.0 responses.
+
+    A short makefile() timeout cannot be retried safely after it times out.
+    Instead, poll a nonblocking transport while preserving HTTPResponse's
+    standard buffering, chunk decoding and content-length handling.
+    """
+    def __init__(self, transport, stop, deadline):
+        super().__init__()
+        self.transport, self.stop, self.deadline = transport, stop, deadline
+        # Keep the socket alive if HTTPConnection detaches a closing response.
+        # This file is only a lifetime lease; all reads happen below.
+        self.lease = transport.makefile('rb', buffering=0)
+        transport.setblocking(False)
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        while True:
+            if self.stop.is_set():
+                raise Cancelled()
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('Model response deadline exceeded')
+            write = False
+            try:
+                # Read first: TLS may already have decrypted bytes buffered.
+                return self.transport.recv_into(buffer)
+            except ssl.SSLWantWriteError:
+                write = True
+            except (BlockingIOError, ssl.SSLWantReadError):
+                pass
+            select.select([] if write else [self.transport], [self.transport] if write else [], [], min(.2, remaining))
+
+    def close(self):
+        if not self.closed:
+            self.lease.close()
+        super().close()
+
+
+class _ResponseSocket:
+    def __init__(self, transport, stop, deadline):
+        self.transport, self.stop, self.deadline = transport, stop, deadline
+
+    def makefile(self, mode):
+        return io.BufferedReader(_ResponseReader(self.transport, self.stop, self.deadline))
 
 
 class ModelConfig:
@@ -83,23 +134,12 @@ class ModelClient:
         self.config = config
         self.stop = stop
         self.connection = None
-        self.socket = None
         self.lock = threading.Lock()
 
     def cancel(self):
         self.stop.set()
-        with self.lock:
-            connection = self.connection
-            active_socket = self.socket
-        if connection:
-            try:
-                if active_socket:
-                    active_socket.shutdown(socket.SHUT_RDWR)
-                elif connection.sock:
-                    connection.sock.shutdown(socket.SHUT_RDWR)
-                connection.close()
-            except OSError:
-                pass
+        # The response reader checks this flag at most every 200 ms. Only the
+        # worker closes the connection, avoiding cross-thread SSL races.
 
     def clean(self, text):
         text = str(text)
@@ -160,6 +200,9 @@ class ModelClient:
             self.connection = connection
         text, calls, finish = '', {}, None
         started = time.monotonic()
+        connection.response_class = lambda sock, *args, **kwargs: http.client.HTTPResponse(
+            _ResponseSocket(sock, self.stop, started + timeout), *args, **kwargs)
+        response = None
 
         def add_text(delta):
             nonlocal text
@@ -172,15 +215,6 @@ class ModelClient:
                 raise Cancelled()
             body = json.dumps(self.payload(system, messages, tools), ensure_ascii=False).encode('utf-8')
             connection.request('POST', path, body=body, headers=headers)
-            with self.lock:
-                # getresponse() may detach/close the original socket when the
-                # server uses Connection: close. Keep a separate handle so a
-                # Windows shutdown still interrupts the reader immediately.
-                original = connection.sock
-                # SSLSocket.dup() is intentionally unsupported. Duplicate only
-                # the raw transport handle for shutdown, never for TLS reads.
-                self.socket = (socket.socket(original.family, original.type, original.proto,
-                                             fileno=socket.dup(original.fileno())) if original else None)
             if self.stop.is_set():
                 raise Cancelled()
             response = connection.getresponse()
@@ -266,9 +300,8 @@ class ModelClient:
                 raise Cancelled() from None
             raise ValueError('模型连接失败、超时或返回格式不兼容，请维护者检查模型配置；地址和密钥不会回显。') from None
         finally:
+            if response is not None:
+                response.close()
             connection.close()
             with self.lock:
-                if self.socket:
-                    self.socket.close()
                 self.connection = None
-                self.socket = None

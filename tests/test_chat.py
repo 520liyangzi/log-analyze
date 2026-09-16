@@ -327,6 +327,21 @@ class NativeChatTests(unittest.TestCase):
             result = self.wait(session['id'])
         self.assertEqual(result['session']['state'], 'idle', result)
         self.assertIn('HTTPS 已验证', self.chat.report(session['id'])['text'])
+        # Also cancel a silent, certificate-verified TLS response mid-stream.
+        self.model.replies = ['wait']
+        with mock.patch('ssl._create_default_https_context', return_value=verified_client):
+            pending = self.send(self.preview(), 'https-cancel')
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if any(e['kind'] == 'assistant' and e['body'].get('text') for e in self.chat.get(pending['id'])['events']):
+                    break
+                time.sleep(.02)
+            stopped_at = time.monotonic()
+            self.chat.stop(pending['id'])
+            stopped = self.wait(pending['id'])
+        self.assertLess(time.monotonic() - stopped_at, 3)
+        self.assertEqual(stopped['session']['state'], 'stopped')
+        self.assertTrue(any('已经收到' in e['body'].get('text', '') for e in stopped['events']))
 
     def test_anthropic_stream_and_json_adapter(self):
         self.config['provider'] = 'anthropic'
