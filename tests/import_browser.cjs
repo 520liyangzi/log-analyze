@@ -61,6 +61,11 @@ async function search(page, id, marker) {
   try {
     await ready(page);
     assert(fs.existsSync(fixture), 'fixture server must generate the ZIP before accepting requests');
+    const importNavigations = [];
+    const recordNavigation = frame => {
+      if (frame === page.mainFrame()) importNavigations.push(frame.url());
+    };
+    page.on('framenavigated', recordNavigation);
     await page.locator('#topUpload').click();
     await page.locator('#uploadFile').setInputFiles(fixture);
     const [uploaded] = await Promise.all([
@@ -68,9 +73,16 @@ async function search(page, id, marker) {
       page.locator('#uploadSubmit').click(),
     ]);
     assert.equal(uploaded.status(), 202);
-    const upload = await uploaded.json();
-    assert.equal(upload.state, 'scanning', 'upload should start directory scan, not indexing');
+    assert.equal(uploaded.request().resourceType(), 'xhr');
+    assert.equal(uploaded.request().isNavigationRequest(), false);
     await page.locator('#importLayoutDialog[open]').waitFor();
+    // Chromium may evict completed XHR bodies from the inspector cache even
+    // though the application consumed them. Read the visible task identity,
+    // then verify persisted state through the independent HTTP request client.
+    const upload = {id: await page.locator('#layoutTaskPicker').inputValue()};
+    assert.match(upload.id, /^[a-f0-9]{32}$/);
+    assert.equal(page.url(), origin + '/');
+    assert.deepEqual(importNavigations, [], 'upload must open review without navigating away');
     const preview = await waitForReview(page, upload.id);
     await page.locator('#layoutConfirm:not([disabled])').waitFor();
     await assertNotIndexed(page, upload.id);
@@ -97,12 +109,15 @@ async function search(page, id, marker) {
       page.locator('#layoutSave').click(),
     ]);
     assert.equal(saved.status(), 200);
-    const savedPreview = await saved.json();
+    await page.locator('#layoutSave:not([disabled])').waitFor();
+    const savedPreview = await json(page, `/api/imports/preview?dataset=${upload.id}`);
+    assert.notEqual(savedPreview.revision, preview.revision, 'saving must persist a new draft revision');
     const savedGroup = savedPreview.groups.find(item => item.id === custom.id);
     assert.equal(savedGroup.line_mode, 'lines');
     for (const [field, value] of Object.entries(mappings)) assert.equal(savedGroup[field], value);
     assert.equal(savedPreview.groups.find(item => item.id === excluded.id).included, false);
-    await page.locator('#layoutSave:not([disabled])').waitFor();
+    assert.deepEqual(importNavigations, [], 'saving a draft must not navigate the page');
+    page.off('framenavigated', recordNavigation);
 
     // Saving alone must not start indexing, and the draft must survive a full reload.
     await assertNotIndexed(page, upload.id);

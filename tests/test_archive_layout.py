@@ -86,14 +86,22 @@ class ArchiveLayoutTests(unittest.TestCase):
     def test_windows_paths_retain_exact_original_source(self):
         name = r'app\logs\run.log'
         plan = self.scan([(name, LOG)])
+        # ZipInfo normalizes the platform's separator when constructing a ZIP
+        # member: Windows writes this fixture as app/logs/run.log, while POSIX
+        # preserves its backslashes.  Provenance must match the actual member
+        # name read from the archive, not the pre-write fixture argument.
+        with zipfile.ZipFile(self.path) as archive:
+            member_name = archive.infolist()[0].filename
+        other_spelling = name if member_name != name else name.replace('\\', '/')
         group = plan['groups'][0]
         self.assertEqual(group['directory'], 'app/logs')
-        self.assertEqual(group['files'][0]['path'], name)
+        self.assertEqual(group['files'][0]['path'], member_name)
         resolver = layout.build_resolver(plan)
-        meta, _ = resolver(name, ['package.zip'])
-        self.assertEqual(meta['path'], name)
-        self.assertEqual(meta['source'], 'package.zip → ' + name)
-        self.assertIsNone(resolver('app/logs/run.log', ['package.zip']))
+        meta, _ = resolver(member_name, ['package.zip'])
+        self.assertEqual(meta['path'], member_name)
+        self.assertEqual(meta['source'], 'package.zip → ' + member_name)
+        self.assertNotEqual(other_spelling, member_name)
+        self.assertIsNone(resolver(other_spelling, ['package.zip']))
 
     def test_binary_and_corrupt_gzip_never_become_selected_logs(self):
         plan = self.scan([('app/root.log', LOG), ('app/image.log', b'\x89PNG\x00\x01\x02\x03'),
