@@ -6,7 +6,7 @@ import datetime as dt
 import gzip
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import runpy
 import shutil
@@ -23,6 +23,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 from collector_environments import CollectorEnvironments
 from chat_engine import ChatManager
+from archive_layout import build_resolver, legacy_meta
+from import_plans import ImportConflict, ImportPlans
 from log_collector import LogCollector
 from index_retention import IndexMaintenance, dataset_lifecycle, expire_indexes
 from retention import RetentionManager
@@ -55,10 +57,14 @@ def timestamp(value, offset='+0800'):
 
 
 def parse_line(raw, offset='+0800', duration_unit='ms'):
-    result = dict(ts=timestamp(raw, offset), time='', level='', thread='', trace='', span='', method='', url='', status=None, duration=None)
+    try:
+        parsed_time = timestamp(raw, offset)
+    except (ValueError, OverflowError):
+        parsed_time = None
+    result = dict(ts=parsed_time, time='', level='', thread='', trace='', span='', method='', url='', status=None, duration=None)
     result.update({key: None if value == 'INTEGER' else '' for key, value in EXTRA_FIELDS.items()})
     match = STAMP.match(raw)
-    if match:
+    if match and parsed_time is not None:
         result['time'] = match[1].replace(',', '.') + ' ' + (match[2] or offset)
     root = ROOT.match(raw)
     if root:
@@ -100,34 +106,7 @@ def parse_line(raw, offset='+0800', duration_unit='ms'):
 
 
 def source_meta(name, chain):
-    parts = PurePosixPath(name.replace('\\', '/')).parts
-    indices = [i for i, part in enumerate(parts) if part == 'log']
-    if not indices:
-        return None
-    index = indices[-1]
-    if index < 3:
-        return None
-    namespace_pod, service = parts[index - 3:index - 1]
-    pod_service = parts[index - 1]
-    suffix = '-' + service
-    expected_pod = pod_service[:-len(suffix)] if pod_service.endswith(suffix) else ''
-    if expected_pod and namespace_pod.endswith('_' + expected_pod):
-        pod = expected_pod
-        namespace = namespace_pod[:-len(expected_pod) - 1]
-    else:
-        # Fall back for imperfect packages without assuming namespace lacks underscores.
-        namespace, sep, pod = namespace_pod.rpartition('_')
-        if not sep:
-            pod, namespace = namespace_pod, ''
-    filename = parts[-1]
-    if '.log' not in filename.lower():
-        return None
-    # root.2026-09-08.log.gz / root.log.1.gz / root.log -> root
-    kind = re.split(r'[.\-_](?=\d)|\.log', filename, maxsplit=1, flags=re.I)[0]
-    return dict(node=PurePosixPath(chain[1] if len(chain) > 1 else chain[0]).stem,
-                namespace=namespace, pod=pod, service=service, kind=kind,
-                filename=filename, archive=' → '.join(chain), path=name,
-                source=' → '.join([*chain, name]))
+    return legacy_meta(name, chain)
 
 
 class Store:
@@ -176,7 +155,7 @@ class Store:
             db.execute("INSERT OR IGNORE INTO log_metadata SELECT 'last_log_id',CAST(COALESCE(MAX(id),0) AS TEXT) FROM logs")
             db.execute('CREATE INDEX IF NOT EXISTS logs_route ON logs(dataset,route_id)')
             db.execute('CREATE INDEX IF NOT EXISTS logs_request_id ON logs(dataset,request_id)')
-            db.execute("UPDATE datasets SET state='failed', error='上次导入被中断，请重新上传' WHERE state='importing'")
+            db.execute("UPDATE datasets SET state='failed', error='上次导入被中断；若有保留的目录方案，可修改后重新确认，否则请重新上传' WHERE state='importing'")
             # A previous version could be stopped during VACUUM after the rows
             # and archive were already removed. Finish that deletion on restart;
             # otherwise return the package to a retryable state.
@@ -206,6 +185,7 @@ class Store:
         self.fts = bool(self.fts_tables)
         self.write_fts = 'log_fts_v2' if 'log_fts_v2' in self.fts_tables else (
             'log_fts' if 'log_fts' in self.fts_tables else '')
+        self.imports = ImportPlans(self)
 
     def fts_table(self, index_version):
         """Return only the FTS generation that actually contains this dataset."""
@@ -250,14 +230,20 @@ class Store:
             with self.access_lock:
                 self.connections -= 1
 
-    @dataset_lifecycle
-    def submit(self, path, name, encoding='auto', offset='+0800', unit='ms'):
-        if encoding not in ('auto', 'utf-8', 'gb18030'):
+    @staticmethod
+    def validate_import_options(encoding, offset, unit):
+        if not isinstance(encoding, str) or encoding not in ('auto', 'utf-8', 'gb18030'):
             raise ValueError('编码无效')
-        if not re.fullmatch(r'[+-](?:0\d|1[0-3])[0-5]\d|[+-]1400', offset):
+        if not isinstance(offset, str) or not re.fullmatch(r'[+-](?:0\d|1[0-3])[0-5]\d|[+-]1400', offset):
             raise ValueError('时区格式应为 +0800')
-        if unit not in ('ms', 's', 'us'):
+        if not isinstance(unit, str) or unit not in ('ms', 's', 'us'):
             raise ValueError('耗时单位无效')
+
+    @dataset_lifecycle
+    def submit(self, path, name, encoding='auto', offset='+0800', unit='ms', review=False):
+        self.validate_import_options(encoding, offset, unit)
+        if review:
+            return self.imports.stage(path, name, encoding, offset, unit)
         identifier = uuid.uuid4().hex
         with self.connect() as db:
             db.execute('INSERT INTO datasets(id,name,state,created,index_version) VALUES(?,?,?,?,?)',
@@ -266,7 +252,7 @@ class Store:
         self.pool.submit(self.ingest, identifier, path, name, encoding, offset, unit)
         return identifier
 
-    def ingest(self, identifier, path, name, encoding, offset, unit):
+    def ingest(self, identifier, path, name, encoding, offset, unit, plan=None, keep_archive=False):
         warnings, stats = [], {'files': 0, 'records': 0, 'bytes': 0, 'entries': 0}
         actual_paths, listed_paths = set(), set()
         audit = dict(manifest_present=False, recognized_time=0, unrecognized_time=0, physical_lines=0)
@@ -274,7 +260,20 @@ class Store:
         max_record = int(os.getenv('LOG_MAX_RECORD_MB', '8')) * 1024 ** 2
         started = time.monotonic()
         try:
+            resolve = build_resolver(plan) if plan is not None else None
             with self.connect() as db:
+                if keep_archive:
+                    # A process may have stopped after committing import batches.
+                    # Reconfirming its persisted plan must rebuild, not append.
+                    self.progress[identifier] = dict(stats, current='正在准备索引并清理上次中断的导入残留', stage='importing')
+                    row = db.execute('SELECT index_version FROM datasets WHERE id=?', (identifier,)).fetchone()
+                    table = self.fts_table(row['index_version']) if row else ''
+                    if table:
+                        db.execute(f'DELETE FROM {table} WHERE rowid IN (SELECT id FROM logs WHERE dataset=?)', (identifier,))
+                    db.execute('DELETE FROM logs WHERE dataset=?', (identifier,))
+                    db.execute('DELETE FROM files WHERE dataset=?', (identifier,))
+                    db.execute("UPDATE datasets SET files=0,records=0,error='',warnings='[]',audit='{}' WHERE id=?", (identifier,))
+                    db.commit()
                 base = ('ts','time','level','thread','trace','span','method','url','status','duration')
                 columns = ('id','dataset','file_id','line','end_line',*base,*EXTRA_FIELDS.keys(),'raw')
                 insert_logs = ('INSERT INTO logs(' + ','.join(columns) + ') VALUES('
@@ -315,9 +314,9 @@ class Store:
                     if len(records_buffer) >= IMPORT_BATCH_SIZE:
                         flush_records()
 
-                def read_log(stream, meta, chain):
+                def read_log(stream, meta, chain, line_mode='auto'):
                     cursor = db.execute('INSERT INTO files(dataset,node,namespace,pod,service,kind,filename,archive,path,source,encoding) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                                        (identifier, *meta.values(), encoding))
+                                        (identifier, *[meta[key] for key in ('node','namespace','pod','service','kind','filename','archive','path','source')], encoding))
                     fid = cursor.lastrowid
                     db.execute('UPDATE files SET archive_chain=? WHERE id=?', (json.dumps(chain), fid))
                     before = stats['records']
@@ -326,6 +325,8 @@ class Store:
                     for number, raw in enumerate(iter(lambda: stream.readline(max_record + 1), b''), 1):
                         if len(raw) > max_record:
                             raise ValueError('单行日志超过限制，请调整 LOG_MAX_RECORD_MB')
+                        if plan is not None and b'\x00' in raw:
+                            raise ValueError('所选文件包含二进制内容，请取消选择或调整文件匹配：' + meta['source'])
                         stats['bytes'] += len(raw)
                         if stats['bytes'] > maximum:
                             raise ValueError('解压后内容超过限制，请调整 LOG_MAX_EXPANDED_GB')
@@ -342,7 +343,8 @@ class Store:
                             if warning not in warnings:
                                 warnings.append(warning)
                         current = parse_line(value, offset, unit)
-                        if current['ts'] is not None or not pending:
+                        if (line_mode == 'lines' or current['ts'] is not None or not pending
+                                or parsed['ts'] is None):
                             if pending:
                                 add_record(fid, start, end, '\n'.join(pending), parsed)
                             pending, parsed, start, size = [value], current, number, len(raw)
@@ -390,14 +392,16 @@ class Store:
                                 with zipfile.ZipFile(temp) as nested:
                                     walk(nested, chain + [item.filename], depth + 1)
                         else:
-                            meta = source_meta(item.filename, chain)
+                            matched = resolve(item.filename, chain) if resolve else None
+                            meta = matched[0] if matched else (source_meta(item.filename, chain) if resolve is None else None)
+                            line_mode = matched[1] if matched else 'auto'
                             if meta:
                                 with archive.open(item) as source:
                                     if lower.endswith('.gz'):
                                         with gzip.GzipFile(fileobj=source) as uncompressed:
-                                            read_log(uncompressed, meta, chain)
+                                            read_log(uncompressed, meta, chain, line_mode)
                                     else:
-                                        read_log(source, meta, chain)
+                                        read_log(source, meta, chain, line_mode)
                 with zipfile.ZipFile(path) as archive:
                     if 'fileList.txt' in archive.namelist():
                         audit['manifest_present'] = True
@@ -413,15 +417,31 @@ class Store:
                     walk(archive, [name])
                 flush_records()
                 if not stats['files']:
-                    raise ValueError('未找到符合 namespace_pod/service/pod-service/log/ 结构的日志')
+                    raise ValueError('没有匹配到可导入的日志文件，请检查所选目录和文件匹配规则' if plan is not None
+                                     else '未找到已识别的日志目录，请通过页面上传并确认自定义目录方案')
                 # Publish the original archive before committing the searchable dataset.
-                shutil.move(str(path), str(self.directory / 'archives' / (identifier + '.zip')))
+                archive_path = self.directory / 'archives' / (identifier + '.zip')
+                if Path(path).resolve() != archive_path.resolve():
+                    shutil.move(str(path), str(archive_path))
                 audit.update(actual_files=len(actual_paths), listed_files=len(listed_paths))
+                if plan is not None:
+                    audit.update(layout_confirmed=True, layout_revision=plan.get('revision'),
+                                 selected_directories=sum(bool(group.get('included')) for group in plan['groups']))
+                if audit['unrecognized_time']:
+                    warnings.append(f"{audit['unrecognized_time']:,} 条记录未识别时间，仍可关键词搜索；时间筛选不包含这些记录。")
                 if audit.get('manifest_checked'):
-                    missing, unlisted = sorted(listed_paths - actual_paths), sorted(actual_paths - listed_paths)
+                    excluded = set()
+                    if plan is not None:
+                        known = {'/'.join([*group['archive_chain'][1:], file['path']]).replace('\\', '/')
+                                 for group in plan['groups'] for file in group['files']}
+                        excluded = listed_paths & (known - actual_paths)
+                        audit['excluded_by_layout_count'] = len(excluded)
+                    missing, unlisted = sorted(listed_paths - actual_paths - excluded), sorted(actual_paths - listed_paths)
                     audit.update(missing_count=len(missing), unlisted_count=len(unlisted), missing=missing[:100], unlisted=unlisted[:100])
                     if missing or unlisted:
                         warnings.append(f'清单核对：{len(missing)} 个清单路径未导入，{len(unlisted)} 个实际日志不在清单中。')
+                    if excluded:
+                        warnings.append(f'按已确认的目录和文件规则排除了 {len(excluded)} 个清单路径，不计入清单缺失。')
                 db.execute("UPDATE datasets SET state='ready',files=?,records=?,warnings=?,parser_version=?,audit=?,completed_at=? WHERE id=?",
                            (stats['files'], stats['records'], json.dumps(warnings, ensure_ascii=False), PARSER_VERSION,
                             json.dumps(audit, ensure_ascii=False), dt.datetime.now(dt.timezone.utc).isoformat(), identifier))
@@ -431,7 +451,8 @@ class Store:
             except sqlite3.Error:
                 pass
         except Exception as exc:
-            (self.directory / 'archives' / (identifier + '.zip')).unlink(missing_ok=True)
+            if not keep_archive:
+                (self.directory / 'archives' / (identifier + '.zip')).unlink(missing_ok=True)
             with self.connect() as db:
                 # Batches are committed during import to cap WAL size, so remove
                 # any partial rows before exposing the failed dataset.
@@ -444,7 +465,8 @@ class Store:
                 db.execute('DELETE FROM files WHERE dataset=?', (identifier,))
                 db.execute("UPDATE datasets SET state='failed',error=? WHERE id=?", (str(exc), identifier))
         finally:
-            Path(path).unlink(missing_ok=True)
+            if not keep_archive:
+                Path(path).unlink(missing_ok=True)
             self.progress.pop(identifier, None)
 
     def datasets(self):
@@ -453,14 +475,16 @@ class Store:
         for row in rows:
             row['warnings'] = json.loads(row['warnings'])
             row['audit'] = json.loads(row['audit'])
-            if row['parser_version'] < PARSER_VERSION:
+            if row['state'] == 'ready' and row['parser_version'] < PARSER_VERSION:
                 row['warnings'].append('该日志包使用旧版解析器，请重新上传以修正 Pod 并补充 RouteID 等新字段。')
-            if row['index_version'] < INDEX_VERSION:
+            if row['state'] == 'ready' and row['index_version'] < INDEX_VERSION:
                 row['warnings'].append('该日志包使用旧版全文索引；仍可正常搜索，重新导入可减少磁盘占用并加快导入。')
             row['progress'] = self.progress.get(row['id'])
             archive = self.directory / 'archives' / (row['id'] + '.zip')
             row['archive_bytes'] = archive.stat().st_size if archive.exists() else 0
             row['archive_relative_path'] = 'archives/' + row['id'] + '.zip'
+            row['layout_available'] = ((self.directory / 'import-plans' / (row['id'] + '.json')).is_file()
+                                       or (row['state'] in ('scanning', 'review', 'failed') and archive.is_file()))
         return rows
 
     def expire_indexes(self, cutoff, busy=lambda: False, control=None):
@@ -482,8 +506,8 @@ class Store:
             row = db.execute('SELECT state FROM datasets WHERE id=?', (identifier,)).fetchone()
             if not row:
                 raise ValueError('日志包不存在或已经删除')
-            if row['state'] == 'importing':
-                raise ValueError('日志包正在导入，完成后再删除')
+            if row['state'] in ('importing', 'scanning'):
+                raise ValueError('日志包正在扫描或导入，完成后再删除')
             if row['state'] == 'deleting':
                 return
             db.execute("UPDATE datasets SET state='deleting',error=? WHERE id=?",
@@ -501,6 +525,7 @@ class Store:
                 db.execute('DELETE FROM logs WHERE dataset=?', (identifier,))
                 db.execute('DELETE FROM files WHERE dataset=?', (identifier,))
             (self.directory / 'archives' / (identifier + '.zip')).unlink(missing_ok=True)
+            (self.directory / 'import-plans' / (identifier + '.json')).unlink(missing_ok=True)
             # Fast deletion keeps free database pages for later imports. VACUUM
             # rewrites the entire database and is therefore explicitly opt-in.
             with self.connect() as db:
@@ -742,7 +767,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/2.2'
+    server_version = 'LogScope/2.3'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -790,6 +815,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(self.server.chats.projects.status(params.get('id', '')))
             elif parsed.path == '/api/datasets':
                 self.json(self.store.datasets())
+            elif parsed.path == '/api/imports/preview':
+                self.json(self.store.imports.preview(params.get('dataset', '')))
             elif parsed.path == '/api/retention':
                 self.json(self.server.retention.status())
             elif parsed.path == '/api/archives/download':
@@ -804,7 +831,12 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == '/api/collector/capability':
                 self.json(self.server.collector.capability())
             elif parsed.path == '/api/collector/status':
-                self.json(self.server.collector.status(params.get('id', '')))
+                identifier = params.get('id', '')
+                with self.server.collector.lock:
+                    exists = identifier in self.server.collector.jobs
+                if not exists:
+                    return self.json({'error': '采集任务不存在或服务已经重启；已下载的 ZIP 可在导入列表查看'}, 404)
+                self.json(self.server.collector.status(identifier))
             elif parsed.path == '/api/collector/environments':
                 self.json(self.server.collector_environments.list())
             elif parsed.path == '/api/files':
@@ -856,6 +888,7 @@ class Handler(BaseHTTPRequestHandler):
                           '/enhancements.css': 'enhancements.css', '/terminal.js': 'terminal.js',
                           '/chat.js': 'chat.js', '/chat.css': 'chat.css',
                           '/retention.js': 'retention.js', '/retention.css': 'retention.css',
+                          '/import-layout.js': 'import-layout.js', '/import-layout.css': 'import-layout.css',
                           '/vendor/xterm.js': 'vendor/xterm.js', '/vendor/xterm.css': 'vendor/xterm.css',
                           '/vendor/addon-fit.js': 'vendor/addon-fit.js'}
                 if parsed.path not in routes:
@@ -900,11 +933,13 @@ class Handler(BaseHTTPRequestHandler):
                         remaining -= len(chunk)
                 if not zipfile.is_zipfile(temporary):
                     raise ValueError('文件不是有效的 ZIP')
-                identifier = self.store.submit(temporary, name, params.get('encoding', 'auto'), params.get('offset', '+0800'), params.get('unit', 'ms'))
+                review = params.get('review', '1') != '0'
+                identifier = self.store.submit(temporary, name, params.get('encoding', 'auto'), params.get('offset', '+0800'), params.get('unit', 'ms'), review=review)
                 temporary = None
-                self.json({'id': identifier}, 202)
+                self.json({'id': identifier, 'state': 'scanning' if review else 'importing'}, 202)
             else:
-                if size < 0 or size > 100000:
+                maximum_body = 8 * 1024 * 1024 if parsed.path in ('/api/imports/draft', '/api/imports/confirm') else 100000
+                if size < 0 or size > maximum_body:
                     raise ValueError('请求过大')
                 if self.headers.get_content_type() != 'application/json':
                     raise ValueError('需要 application/json 请求')
@@ -913,6 +948,12 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('JSON 请求必须是对象')
                 if parsed.path == '/api/retention/cancel':
                     self.json(self.server.retention.cancel())
+                elif parsed.path == '/api/imports/draft':
+                    self.json(self.store.imports.save_draft(body))
+                elif parsed.path == '/api/imports/confirm':
+                    self.json(self.store.imports.confirm(body), 202)
+                elif parsed.path == '/api/imports/rescan':
+                    self.json(self.store.imports.rescan(body.get('dataset', '')), 202)
                 elif parsed.path == '/api/chat/preview':
                     self.json(self.server.chats.preview(body))
                 elif parsed.path == '/api/chat/send':
@@ -976,6 +1017,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.json(self.server.terminals.delete(body))
                 else:
                     self.json({'error':'不存在'}, 404)
+        except ImportConflict as exc:
+            self.json({'error': str(exc), 'code': 'IMPORT_CONFLICT'}, 409)
         except IndexMaintenance as exc:
             self.json({'error': str(exc), 'code': 'INDEX_MAINTENANCE'}, 503)
         except (ValueError, KeyError, OSError, EOFError) as exc:

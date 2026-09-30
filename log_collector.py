@@ -92,7 +92,7 @@ class LogCollector:
         if not 1 <= poll <= 300:
             raise ValueError('轮询间隔需要在 1～300 秒之间')
         with self.lock:
-            if any(job['state'] in ('collecting', 'importing') for job in self.jobs.values()):
+            if any(job['state'] in ('collecting', 'scanning', 'importing') for job in self.jobs.values()):
                 raise ValueError('已有日志正在采集或导入，请完成后再开始下一次')
             identifier = uuid.uuid4().hex
             job = dict(id=identifier, state='collecting', pod=pod, start=start_text, end=end_text,
@@ -100,7 +100,8 @@ class LogCollector:
                        dataset_id='', output='')
             self.jobs[identifier] = job
         options.update(timeout=timeout, poll=poll, encoding=str(body.get('encoding', 'auto')),
-                       offset=str(body.get('offset', '+0800')), unit=str(body.get('unit', 'ms')))
+                       offset=str(body.get('offset', '+0800')), unit=str(body.get('unit', 'ms')),
+                       review=body.get('review') is not False)
         self.pool.submit(self._run, identifier, job.copy(), options)
         return self.status(identifier)
 
@@ -157,11 +158,12 @@ class LogCollector:
             shutil.rmtree(output_dir, ignore_errors=True)
             name = re.sub(r'[^0-9A-Za-z_.\-\u4e00-\u9fff]+', '-', job['pod']).strip('-') or 'pod'
             name += '_' + job['start'].replace(':', '').replace(' ', '_') + '_' + job['end'].replace(':', '').replace(' ', '_') + '.zip'
-            dataset = self.store.submit(staged, name, options['encoding'], options['offset'], options['unit'])
+            dataset = self.store.submit(staged, name, options['encoding'], options['offset'], options['unit'], review=options['review'])
             staged = None
             with self.lock:
-                self.jobs[identifier].update(state='importing', dataset_id=dataset,
-                                             message=f'已下载 {archive.name}，正在解析并建立索引…', output=safe_output)
+                self.jobs[identifier].update(state='scanning' if options['review'] else 'importing', dataset_id=dataset,
+                                             message=f'已下载 {archive.name}，正在扫描目录，确认后再建立索引…' if options['review']
+                                             else f'已下载 {archive.name}，正在解析并建立索引…', output=safe_output)
         except Exception as exc:
             with self.lock:
                 current = self.jobs.get(identifier)
@@ -179,17 +181,27 @@ class LogCollector:
             if identifier not in self.jobs:
                 raise ValueError('采集任务不存在或服务已经重启')
             job = dict(self.jobs[identifier])
-        if job['state'] == 'importing' and job['dataset_id']:
+        if job['state'] in ('scanning', 'review', 'importing', 'failed') and job['dataset_id']:
             dataset = next((item for item in self.store.datasets() if item['id'] == job['dataset_id']), None)
             if dataset:
                 if dataset['state'] == 'ready':
                     job.update(state='ready', message=f'采集并导入完成：{dataset["records"]:,} 条日志')
+                elif dataset['state'] == 'scanning':
+                    job.update(state='scanning', message='ZIP 已下载，正在扫描目录和读取样例；确认后才建立索引',
+                               progress=dataset.get('progress'))
+                elif dataset['state'] == 'review':
+                    job.update(state='review', message='ZIP 已下载，请确认目录和日志文件，再开始建立索引')
                 elif dataset['state'] == 'failed':
                     job.update(state='failed', message='ZIP 已下载，但导入失败：' + dataset.get('error', '未知错误'))
                 elif dataset.get('progress'):
                     progress = dataset['progress']
+                    job['state'] = dataset['state']
                     job['progress'] = progress
                     job['message'] = f'正在建立索引：{progress.get("files", 0):,} 个文件、{progress.get("records", 0):,} 条记录'
+                else:
+                    job.update(state=dataset['state'], message='目录已确认，正在等待建立索引')
+            else:
+                job.update(state='failed', message='该采集日志包已删除')
             with self.lock:
                 self.jobs[identifier].update(state=job['state'], message=job['message'])
         try:

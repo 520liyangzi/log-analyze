@@ -34,8 +34,33 @@ jobs:
         with:
           name: native-chat-browser
           path: test-results/
+  import-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save --package-lock=false playwright@1.62.1
+      - run: npx playwright install --with-deps chromium
+      - name: Import preview browser regression with generated ZIP
+        run: |
+          python tests/import_browser_server.py > test-import-server.log 2>&1 &
+          fixture_pid=$!
+          trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
+          node tests/import_browser.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: import-preview-browser
+          path: |
+            test-results/
+            test-import-server.log
   build:
-    needs: browser
+    needs: [browser, import-browser]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,6 +110,8 @@ jobs:
             if ($cancel.maintenance) { throw 'Idle cancellation must not start maintenance' }
             $retentionScript = Invoke-WebRequest 'http://127.0.0.1:8877/retention.js' -UseBasicParsing
             if ($retentionScript.StatusCode -ne 200) { throw 'Missing archive retention assets' }
+            python tests/exe_import_smoke.py --url 'http://127.0.0.1:8877'
+            if ($LASTEXITCODE -ne 0) { throw 'Packaged EXE import-layout smoke test failed' }
           } finally {
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
           }

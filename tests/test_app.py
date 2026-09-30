@@ -144,7 +144,7 @@ class FailureTests(unittest.TestCase):
             base='http://127.0.0.1:'+str(server.server_address[1])
             try:
                 archive=create_demo(Path(temp)/'demo.zip')
-                request=Request(base+'/api/upload?name=test.zip',data=archive.read_bytes(),headers={'Content-Type':'application/zip'},method='POST')
+                request=Request(base+'/api/upload?name=test.zip&review=0',data=archive.read_bytes(),headers={'Content-Type':'application/zip'},method='POST')
                 with urlopen(request) as response:
                     self.assertEqual(response.status,202);identifier=json.load(response)['id']
                 server.store.pool.shutdown(wait=True)
@@ -210,11 +210,19 @@ print('download complete password=' + str(a.password),flush=True)
                 job=api('/api/collector/start',dict(environment_id=environment['id'],pod='order;touch hacked',
                                                      start='2026-09-10 14:00:00',end='2026-09-10 16:30:00'))
                 deadline=time.monotonic()+15
+                confirmed = False
                 while time.monotonic()<deadline:
                     job=api('/api/collector/status?id='+job['id'])
+                    if job['state'] == 'review' and not confirmed:
+                        preview = api('/api/imports/preview?dataset=' + job['dataset_id'])
+                        with server.store.connect() as db:
+                            self.assertEqual(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (job['dataset_id'],)).fetchone()[0], 0)
+                        api('/api/imports/confirm', dict(dataset=job['dataset_id'], revision=preview['revision']))
+                        confirmed = True
                     if job['state'] in ('ready','failed'):break
                     time.sleep(.05)
                 self.assertEqual(job['state'],'ready',job['message'])
+                self.assertTrue(confirmed, 'Online collection must wait for directory confirmation')
                 self.assertIn('elapsed_seconds',job)
                 self.assertGreaterEqual(job['elapsed_seconds'],0)
                 self.assertNotIn('test secret',job['output'])

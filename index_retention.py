@@ -170,7 +170,7 @@ def expire_indexes(store, cutoff, busy=lambda: False, control=None):
                 reserved = True
         before = database_bytes(store)
         with maintenance_connection(store, control) as db:
-            if db.execute("SELECT 1 FROM datasets WHERE state IN ('importing','deleting') LIMIT 1").fetchone():
+            if db.execute("SELECT 1 FROM datasets WHERE state IN ('scanning','importing','deleting') LIMIT 1").fetchone():
                 return defer('有日志导入或手动删除排队，本轮暂缓')
             for row in expired:
                 identifier = row['id']

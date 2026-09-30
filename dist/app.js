@@ -10,6 +10,7 @@ try { savedUI=JSON.parse(localStorage.getItem(UI_STATE_KEY)||'{}'); } catch {}
 const state = { dataset: savedUI.dataset || '', datasets: [], files: [], view: 'search', page: 1, tracePage: 1, lastSearch: null, lastTrace: null, rows: new Map(), searchSerial: 0, traceSerial: 0, refreshSerial: 0, correlation: null, collectionSerial: 0, uiRestored: false, datasetsLoading: false, datasetRefreshPending: true };
 let datasetRetryTimer;
 let collectorEnvironments=[];
+let lastCollectionJob;
 let toastTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 4500); }
 function progressHTML(title, detail='', percent=null, tone='active') {
@@ -100,7 +101,7 @@ function empty(container, title, message, importButton=false) {
 function clearResults() {
   state.lastSearch = null; state.lastTrace = null; state.rows.clear(); state.searchSerial++; state.traceSerial++;
   state.correlation = null; $('#correlation').hidden = true;
-  empty($('#searchResults'), state.dataset ? '准备好，从一个关键词开始' : '无需解压，直接开始', state.dataset ? '输入接口、异常关键字或时间片段，搜索全部节点；也可以直接搜索查看所有日志。' : '上传包含多个节点 ZIP 的日志包，自动解析 Pod 下的明文与 GZIP 日志。', !state.dataset);
+  empty($('#searchResults'), state.dataset ? '准备好，从一个关键词开始' : '无需解压，从目录确认开始', state.dataset ? '输入接口、异常关键字或时间片段，搜索全部节点；也可以直接搜索查看所有日志。' : '上传 ZIP，扫描实际目录并确认范围后，统一搜索各节点的文本与 GZIP 日志。', !state.dataset);
   empty($('#traceResults'),'输入流水号，查看请求时间线','流水号按原始字符串匹配，长数字不会丢失精度。');
 }
 async function refreshDatasets(selectId) {
@@ -118,9 +119,10 @@ async function refreshDatasets(selectId) {
   $('#dataset').innerHTML = ready.length ? ready.map(d => `<option value="${d.id}">${escapeHTML(d.name)}</option>`).join('') : '<option value="">尚未导入日志包</option>';
   $('#dataset').value = state.dataset;
   const current = ready.find(d => d.id === state.dataset);
-  $('#datasetInfo').textContent = current ? `${number(current.files)} 份日志文件 · ${number(current.records)} 条记录 · 原包 ${formatBytes(current.archive_bytes)}${current.audit?.manifest_checked ? ' · 清单缺失 '+number(current.audit.missing_count)+' 份' : ''}` : '上传外层 ZIP，自动检索所有节点。';
+  $('#datasetInfo').textContent = current ? `${number(current.files)} 份日志文件 · ${number(current.records)} 条记录 · 原包 ${formatBytes(current.archive_bytes)}${current.audit?.manifest_checked ? ' · 清单缺失 '+number(current.audit.missing_count)+' 份' : ''}` : '上传 ZIP，先确认目录再建立索引。';
   $('#deleteDataset').disabled=!current;
   const pending = datasets.find(d => d.state === 'importing');
+  const scanning = datasets.find(d => d.state === 'scanning');
   const deleting = datasets.find(d => d.state === 'deleting');
   const failed = datasets.find(d => d.state === 'failed');
   const status = $('#importStatus');
@@ -132,7 +134,9 @@ async function refreshDatasets(selectId) {
     const p=pending.progress||{};
     const current=p.current?` · ${p.current}`:'';
     showProgress(status,`正在解析并建立索引：${pending.name}`,`已处理 ${number(p.files)} 个文件 · ${number(p.records)} 条记录 · ${formatBytes(p.bytes)} · ${number(p.records_per_second)} 条/秒${current}`);
-  } else if (failed && datasets[0]?.id === failed.id && !selectId) {
+  } else if (scanning) {
+    status.hidden = false; showProgress(status, `正在扫描 ZIP 目录：${scanning.name}`, '只识别目录与日志样例，确认导入范围后才建立索引。');
+  } else if (failed && !failed.layout_available && datasets[0]?.id === failed.id && !selectId) {
     status.hidden = false; status.classList.add('failed'); status.textContent = `导入失败：${failed.name} — ${failed.error}。已有日志包仍可使用。`;
   } else if (current?.warnings?.length) {
     status.hidden = false; status.textContent = '导入提示：' + current.warnings.join('；');
@@ -310,17 +314,22 @@ async function openCollector() {
     await loadCollectorEnvironments(savedUI.collector?.environment||$('#collectEnvironment').value);
     const capability=await api('/api/collector/capability');
     $('#collectorCapability').textContent=capability.available
-      ? `${capability.script} 已就绪；下载成功后自动导入并建立索引。`
+      ? `${capability.script} 已就绪；下载后扫描目录，确认导入范围后才建立索引。`
       : capability.reason;
     $('#collectSubmit').disabled=!capability.available;
   }catch(error){$('#collectorCapability').textContent=error.message;$('#collectSubmit').disabled=true;}
 }
 function renderCollection(job){
+  lastCollectionJob=job;
   const status=$('#collectionStatus');status.hidden=false;status.classList.toggle('failed',job.state==='failed');status.classList.toggle('complete',job.state==='ready');
   const scope=`${job.pod} · ${job.start} 至 ${job.end}`;
   if(job.state==='collecting'){
     const elapsed=Number(job.elapsed_seconds||0);
     showProgress(status,'平台正在生成并下载 ZIP',`${scope} · 已等待 ${formatDuration(elapsed)} · ${job.message}`);
+  }else if(job.state==='scanning'){
+    showProgress(status,'ZIP 已下载，正在扫描目录',`${scope} · 确认目录和识别字段后才建立索引`);
+  }else if(job.state==='review'){
+    showProgress(status,'ZIP 目录已就绪，等待确认',`${scope} · 请在导入确认页选择需要的目录和日志文件`,100,'success');
   }else if(job.state==='importing'){
     const p=job.progress||{};
     showProgress(status,'ZIP 已下载，正在解析并建立索引',`${scope} · ${number(p.files)} 个文件 · ${number(p.records)} 条记录 · ${formatBytes(p.bytes)} · ${number(p.records_per_second)} 条/秒`);
@@ -337,17 +346,25 @@ async function pollCollection(identifier){
     const job=await api('/api/collector/status?id='+encodeURIComponent(identifier));
     if(serial!==state.collectionSerial)return;
     renderCollection(job);
-    if(job.state==='ready'){
+    if(job.state==='review'){
+      localStorage.removeItem(COLLECT_JOB_KEY);
+      await refreshDatasets();
+      if(job.dataset_id)window.LogScopeImports?.open(job.dataset_id);
+    }else if(job.state==='ready'){
       localStorage.removeItem(COLLECT_JOB_KEY);await refreshDatasets(job.dataset_id);setView('search');toast('日志采集和导入完成');
     }else if(job.state==='failed'){
-      localStorage.removeItem(COLLECT_JOB_KEY);toast(job.message);
-    }else setTimeout(()=>pollCollection(identifier),1200);
+      localStorage.removeItem(COLLECT_JOB_KEY);toast(job.message);void refreshDatasets().catch(()=>{});
+      if(job.dataset_id)window.LogScopeImports?.open(job.dataset_id);
+    }else setTimeout(()=>{if(serial===state.collectionSerial)pollCollection(identifier);},1200);
   }catch(error){
     if(serial!==state.collectionSerial)return;
-    localStorage.removeItem(COLLECT_JOB_KEY);$('#collectionStatus').hidden=true;toast(error.message);
+    if(error.status===404){localStorage.removeItem(COLLECT_JOB_KEY);$('#collectionStatus').textContent='采集任务已不存在；已下载的日志包可在导入任务列表查看。';return;}
+    $('#collectionStatus').hidden=false;$('#collectionStatus').textContent='采集状态暂不可用，稍后自动重试。任务与已填写参数仍保留。';
+    setTimeout(()=>{if(serial===state.collectionSerial)pollCollection(identifier);},5000);
   }
 }
 async function startCollection(){
+  if($('#collectSubmit').disabled)return;
   const button=$('#collectSubmit');button.disabled=true;button.classList.add('is-loading');button.textContent='正在启动…';
   try{
     const result=await api('/api/collector/start',{environment_id:$('#collectEnvironment').value,pod:$('#collectPod').value,start:$('#collectStart').value,end:$('#collectEnd').value,
@@ -371,26 +388,20 @@ let selectedFile;
 function chooseFile(file) { if(!file) return; selectedFile=file; $('#chosenName').textContent=`${file.name} · ${(file.size/1024/1024).toFixed(2)} MB`; }
 async function upload(file) {
   if(!file || !file.name.toLowerCase().endsWith('.zip')) return toast('请选择 ZIP 文件');
+  if($('#uploadSubmit').disabled)return;
   const button=$('#uploadSubmit'); button.disabled=true; showProgress($('#uploadProgress'),'准备上传 ZIP','正在建立本机连接…',0);
   try {
     const params={name:file.name,encoding:$('#encoding').value,offset:$('#importOffset').value,unit:$('#durationUnit').value};
     const result=await new Promise((resolve,reject)=>{
       const xhr=new XMLHttpRequest(); xhr.open('POST','/api/upload?'+paramsURL(params)); xhr.setRequestHeader('Content-Type','application/zip');
       xhr.upload.onprogress=e=>{if(e.lengthComputable)showProgress($('#uploadProgress'),'正在上传 ZIP',`${formatBytes(e.loaded)} / ${formatBytes(e.total)}`,e.loaded/e.total*100);};
-      xhr.upload.onload=()=>showProgress($('#uploadProgress'),'ZIP 上传完成','正在提交导入任务…',100,'success');
+      xhr.upload.onload=()=>showProgress($('#uploadProgress'),'ZIP 上传完成','正在提交目录扫描任务…',100,'success');
       xhr.onload=()=>{try{const r=JSON.parse(xhr.responseText); xhr.status>=200&&xhr.status<300?resolve(r):reject(new Error(r.error||'上传失败'));}catch{reject(new Error('上传响应异常'));}};
       xhr.onerror=()=>reject(new Error('上传失败，请检查本地服务是否仍在运行')); xhr.send(file);
     });
-    $('#uploadDialog').close(); $('#uploadProgress').innerHTML=''; toast('上传完成，正在解析日志包');
-    await refreshDatasets();
-    const poll=async()=>{
-      try {
-        const datasets=await refreshDatasets(result.id); const current=datasets?.find(d=>d.id===result.id);
-        if(current?.state==='ready'){ setView('search'); toast(`导入完成：${number(current.records)} 条日志`); }
-        else if(current?.state==='failed'){toast('导入失败：'+current.error);}
-        else setTimeout(poll,1200);
-      }catch(error){toast(error.message);}
-    }; setTimeout(poll,700);
+    $('#uploadDialog').close(); $('#uploadProgress').innerHTML=''; toast('上传完成，正在扫描目录；确认后才建立索引');
+    void refreshDatasets().catch(()=>{});
+    window.LogScopeImports?.open(result.id);
   }catch(error){showProgress($('#uploadProgress'),'上传失败',error.message,100,'danger');}
   finally{button.disabled=false;}
 }
@@ -507,7 +518,14 @@ $('#datasetLoadRetry').addEventListener('click', () => { void refreshDatasets().
 let importResumeTimer;
 document.addEventListener('logscope:datasets', event => {
   clearTimeout(importResumeTimer);
-  if(event.detail?.some(dataset => dataset.state === 'importing')) importResumeTimer = setTimeout(() => { void refreshDatasets().catch(() => {}); }, 1500);
+  if(event.detail?.some(dataset => ['scanning','importing','deleting'].includes(dataset.state))) importResumeTimer = setTimeout(() => { void refreshDatasets().catch(() => {}); }, 1500);
+  // Collection polling stops at review; subsequent import progress belongs to
+  // the dataset and must replace the old "waiting for confirmation" banner.
+  if(lastCollectionJob?.dataset_id&&['review','importing'].includes(lastCollectionJob.state)){
+    const row=event.detail?.find(dataset=>dataset.id===lastCollectionJob.dataset_id);
+    if(!row||['expired','deleting'].includes(row.state)){lastCollectionJob=null;$('#collectionStatus').hidden=true;}
+    else if(['review','importing','ready','failed'].includes(row.state))renderCollection({...lastCollectionJob,state:row.state,progress:row.progress,message:row.state==='ready'?'目录已确认，索引建立完成。':row.error||lastCollectionJob.message});
+  }
 });
 const initialCollectionJob=localStorage.getItem(COLLECT_JOB_KEY);if(initialCollectionJob)pollCollection(initialCollectionJob);
 void refreshDatasets(state.dataset).catch(() => {});
