@@ -555,7 +555,9 @@ class NativeChatTests(unittest.TestCase):
         self.model.replies = [response('', [('search_logs', dict(q='stop-after-many-rounds-' + str(i), size=1))])
                               for i in range(rounds)] + ['wait']
         session = self.send(self.preview(), 'stop-past-round-limit')
-        deadline = time.monotonic() + 5
+        # Let slower Windows CI finish the ten setup rounds; cancellation itself
+        # is still timed separately below and must complete within three seconds.
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             result = self.chat.get(session['id'])
             if any('已经收到的文字' in e['body'].get('text', '') for e in result['events']):
