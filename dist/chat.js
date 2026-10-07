@@ -50,13 +50,18 @@
     $('#chatRemoteUrl').disabled=submitting||restoring;$('#chatRepository').disabled=submitting||restoring;$('#chatUseCode').disabled=submitting||restoring;
     $('#chatProjectNote').dataset.working=String(syncing);
     const useCode=$('#chatUseCode').checked, fixedProject=current?.task.project&&!projectDirty;
-    const projectState=useCode?(syncing?'正在同步…':project||fixedProject?$('#chatBranch').value:'待选择仓库'):'未关联';
+    const linked=Boolean(useCode&&(project||fixedProject));
+    const activeProject=project||(fixedProject?current.task.project:null);
+    const repositoryName=repositories.find(repo=>repo.id===activeProject?.repository_id)?.name||(activeProject?.remote_url||'').split(/[/:]/).filter(Boolean).pop()?.replace(/\.git$/,'')||'已选项目';
+    const projectState=restoring?'正在恢复会话的项目设置…':useCode?(syncing?'正在同步…':linked?repositoryName+' · '+$('#chatBranch').value:'待选择仓库'):'未关联 · 当前仅分析日志';
     $('#chatOpenProject').disabled=restoring||busy||submitting;
-    $('#chatOpenProject').classList.toggle('is-linked',Boolean(useCode&&(project||fixedProject)));
+    $('#chatOpenProject').classList.toggle('is-linked',linked);
+    $('#chatProjectBanner').classList.toggle('is-linked',linked);
     $('#chatOpenProject').setAttribute('aria-expanded',String($('#chatProjectOptions').open));
     $('#chatOpenProject').title=useCode?'项目代码 · '+projectState:'关联 Git 仓库，让 AI 结合项目代码定位问题';
-    $('#chatProjectButtonLabel').textContent=useCode?'项目代码':'关联项目代码';
+    $('#chatProjectButtonLabel').textContent=linked?'项目代码设置':'关联项目代码';
     $('#chatProjectButtonState').textContent=projectState;
+    $('#chatProjectButtonState').title=projectState;
   }
   function renderSessions(){
     $('#chatSessionList').innerHTML=sessions.length?sessions.map(s=>`<button class="chat-session ${s.id===selected?'active':''}" data-chat-session="${s.id}"><span class="chat-session-title">${escapeHTML(s.title)}</span><span><i class="${s.state==='running'?'live':''}"></i>${states[s.state]||s.state} · ${escapeHTML(s.task.name)}</span></button>`).join(''):'<div class="chat-list-empty">暂无排查会话<br>发出第一个问题后自动保存</div>';

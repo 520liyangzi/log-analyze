@@ -201,6 +201,22 @@ async function projectRepositoryRegression(browser, terminalRequests) {
     await page.locator('#chatCapability').filter({hasText:'共享模型已配置'}).waitFor();
     assert.equal(await page.locator('#chatProjectPath').count(), 0,
       'new code investigations should use a Git URL, not a manually prepared local directory');
+    await page.locator('#chatProjectBanner').waitFor({state:'visible'});
+    assert.equal(await page.locator('#chatProjectBanner').evaluate(banner => {
+      const modelStatus = document.querySelector('.chat-topline');
+      const conversations = document.querySelector('.chat-layout');
+      return banner.contains(document.querySelector('#chatOpenProject')) &&
+        Boolean(banner.compareDocumentPosition(modelStatus) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+        Boolean(banner.compareDocumentPosition(conversations) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+        banner.getBoundingClientRect().bottom <= modelStatus.getBoundingClientRect().top;
+    }), true, 'the project entry needs its own visible row before model status and conversations');
+    const entryButton = await page.locator('#chatOpenProject').boundingBox();
+    const secondaryButton = await page.locator('#chatRefreshConfig').boundingBox();
+    assert(entryButton && secondaryButton && entryButton.height >= 44 && entryButton.width > secondaryButton.width,
+      'project association must offer a prominent, comfortably clickable main action');
+    await page.locator('#chatProjectButtonLabel').filter({hasText:'关联项目代码'}).waitFor();
+    await page.locator('#chatProjectButtonState').filter({hasText:'未关联'}).waitFor();
+    await page.locator('#chatProjectBanner').screenshot({path:'test-results/chat-project-unlinked.png'});
     await openProjectFromTopButton();
     await page.locator('#chatRemoteUrl').fill(repository.remote_url);
     await page.locator('#chatSyncProject').click();
@@ -217,6 +233,10 @@ async function projectRepositoryRegression(browser, terminalRequests) {
     assert(branches.length >= 2 && branches.every(branch => branch.startsWith('origin/') && branch !== 'origin/HEAD'));
     await page.locator('#chatBranch').selectOption(repository.branch);
     await page.locator('#chatProjectButtonState').filter({hasText:repository.branch}).waitFor();
+    assert((await page.locator('#chatProjectButtonState').innerText()).includes(cached.name),
+      'the visible entry should identify both the linked repository and its branch');
+    await page.locator('#chatProjectButtonLabel').filter({hasText:'项目代码设置'}).waitFor();
+    await page.locator('#chatProjectBanner').screenshot({path:'test-results/chat-project-linked.png'});
     await page.locator('#chatQuestion').fill('结合已选分支代码，检查 Service.java 的异常证据。');
     await page.locator('#chatSend').click();
     await page.locator('#chatPreviewDialog[open]').waitFor();
