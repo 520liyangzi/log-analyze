@@ -47,8 +47,11 @@ async function send(page, question, expected) {
     await page.locator('#uploadSubmit').click();
     await page.locator('#importLayoutDialog[open]').waitFor();
     await page.locator('#layoutConfirm:not([disabled])').waitFor();
-    assert.equal(await page.locator('.layout-group').count(),2);
+    // The root manifest is also listed for review, but is not an included log
+    // directory. Count only selected directories rather than all scanned groups.
+    assert.equal(await page.locator('.layout-group [data-layout-field="included"]:checked').count(),2);
     await page.locator('#layoutFilter').fill('node-a');
+    assert.equal(await page.locator('.layout-group').count(),1);
     await page.locator('#importLayoutDialog').evaluate(dialog => {dialog.scrollTop=0;});
     await capture(page,'import-layout',{selector:'#importLayoutDialog'});
     await page.locator('#layoutFilter').fill('');
