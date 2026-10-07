@@ -183,15 +183,23 @@ async function projectRepositoryRegression(browser, terminalRequests) {
       projectSyncRequests.push(request);
   });
   trackTerminalRequests(page, terminalRequests);
-  async function openProjectFromTopButton() {
+  async function openProjectSettings() {
     const syncCount = projectSyncRequests.length;
     await page.locator('#chatOpenProject').waitFor({state:'visible'});
     await page.locator('#chatOpenProject').click();
-    await page.locator('#chatProjectOptions[open]').waitFor();
+    await page.locator('dialog#chatProjectOptions[open]').waitFor();
+    await page.locator('#chatProjectTitle').filter({hasText:'项目代码设置'}).waitFor();
     assert.equal(await page.locator('#chatUseCode').isChecked(), true);
     await page.locator('#chatRemoteUrl').waitFor({state:'visible'});
     assert.equal(projectSyncRequests.length, syncCount,
       'opening project options must not clone or fetch before update/send');
+  }
+  async function finishProjectSettings() {
+    const syncCount = projectSyncRequests.length;
+    await page.locator('#chatProjectDone').click();
+    await page.locator('#chatProjectOptions').waitFor({state:'hidden'});
+    assert.equal(projectSyncRequests.length, syncCount,
+      'closing project settings must preserve the selection without starting a fetch');
   }
   try {
     const repository = await (await page.request.get(fixture.control_url + '/__fixture__/repository')).json();
@@ -201,23 +209,24 @@ async function projectRepositoryRegression(browser, terminalRequests) {
     await page.locator('#chatCapability').filter({hasText:'共享模型已配置'}).waitFor();
     assert.equal(await page.locator('#chatProjectPath').count(), 0,
       'new code investigations should use a Git URL, not a manually prepared local directory');
-    await page.locator('#chatProjectBanner').waitFor({state:'visible'});
-    assert.equal(await page.locator('#chatProjectBanner').evaluate(banner => {
-      const modelStatus = document.querySelector('.chat-topline');
-      const conversations = document.querySelector('.chat-layout');
-      return banner.contains(document.querySelector('#chatOpenProject')) &&
-        Boolean(banner.compareDocumentPosition(modelStatus) & Node.DOCUMENT_POSITION_FOLLOWING) &&
-        Boolean(banner.compareDocumentPosition(conversations) & Node.DOCUMENT_POSITION_FOLLOWING) &&
-        banner.getBoundingClientRect().bottom <= modelStatus.getBoundingClientRect().top;
-    }), true, 'the project entry needs its own visible row before model status and conversations');
+    assert.equal(await page.locator('#chatOpenProject').count(), 1);
+    assert.equal(await page.locator('#chatProjectBanner, #chatProjectOptions summary').count(), 0,
+      'project settings should have one composer entry, without a duplicate banner or disclosure');
+    await page.locator('#chatProjectEntry').waitFor({state:'visible'});
+    assert.equal(await page.locator('#chatProjectEntry').evaluate(entry => {
+      const question = document.querySelector('#chatQuestion');
+      return Boolean(entry.closest('.chat-compose')) && entry.contains(document.querySelector('#chatOpenProject')) &&
+        Boolean(entry.compareDocumentPosition(question) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+        entry.getBoundingClientRect().bottom <= question.getBoundingClientRect().top;
+    }), true, 'the only project-settings entry should sit above the question in the composer');
     const entryButton = await page.locator('#chatOpenProject').boundingBox();
     const secondaryButton = await page.locator('#chatRefreshConfig').boundingBox();
     assert(entryButton && secondaryButton && entryButton.height >= 44 && entryButton.width > secondaryButton.width,
       'project association must offer a prominent, comfortably clickable main action');
-    await page.locator('#chatProjectButtonLabel').filter({hasText:'关联项目代码'}).waitFor();
+    await page.locator('#chatProjectButtonLabel').filter({hasText:'项目代码设置'}).waitFor();
     await page.locator('#chatProjectButtonState').filter({hasText:'未关联'}).waitFor();
-    await page.locator('#chatProjectBanner').screenshot({path:'test-results/chat-project-unlinked.png'});
-    await openProjectFromTopButton();
+    await page.locator('#chatProjectEntry').screenshot({path:'test-results/chat-project-unlinked.png'});
+    await openProjectSettings();
     await page.locator('#chatRemoteUrl').fill(repository.remote_url);
     await page.locator('#chatSyncProject').click();
     await page.waitForFunction(branch => !document.querySelector('#chatBranch').disabled &&
@@ -232,11 +241,13 @@ async function projectRepositoryRegression(browser, terminalRequests) {
     const branches = await page.locator('#chatBranch option').evaluateAll(options => options.map(option => option.value));
     assert(branches.length >= 2 && branches.every(branch => branch.startsWith('origin/') && branch !== 'origin/HEAD'));
     await page.locator('#chatBranch').selectOption(repository.branch);
+    await page.locator('#chatProjectOptions').screenshot({path:'test-results/chat-project-dialog.png'});
+    await finishProjectSettings();
     await page.locator('#chatProjectButtonState').filter({hasText:repository.branch}).waitFor();
     assert((await page.locator('#chatProjectButtonState').innerText()).includes(cached.name),
       'the visible entry should identify both the linked repository and its branch');
     await page.locator('#chatProjectButtonLabel').filter({hasText:'项目代码设置'}).waitFor();
-    await page.locator('#chatProjectBanner').screenshot({path:'test-results/chat-project-linked.png'});
+    await page.locator('#chatProjectEntry').screenshot({path:'test-results/chat-project-linked.png'});
     await page.locator('#chatQuestion').fill('结合已选分支代码，检查 Service.java 的异常证据。');
     await page.locator('#chatSend').click();
     await page.locator('#chatPreviewDialog[open]').waitFor();
@@ -267,13 +278,24 @@ async function projectRepositoryRegression(browser, terminalRequests) {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false,
       'project controls must not cause mobile horizontal overflow');
     await page.screenshot({path:'test-results/chat-project-mobile.png',fullPage:true});
+    await openProjectSettings();
+    const projectDialog = await page.locator('#chatProjectOptions').boundingBox();
+    assert(projectDialog && projectDialog.x >= 0 && projectDialog.x + projectDialog.width <= 390,
+      'the project settings dialog must fit the narrow viewport');
+    assert.equal(await page.locator('#chatProjectOptions').evaluate(dialog => dialog.scrollWidth > dialog.clientWidth), false,
+      'project settings fields must not overflow the mobile dialog');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.locator('#chatProjectOptions').screenshot({path:'test-results/chat-project-dialog-mobile.png'});
+    await finishProjectSettings();
+    await page.locator('#chatProjectButtonState').filter({hasText:repository.branch}).waitFor();
     await page.setViewportSize({width:1440,height:1120});
 
     const advanced = await (await page.request.post(fixture.control_url + '/__fixture__/advance')).json();
     assert.notEqual(advanced.current_commit, repository.initial_commit);
     await page.locator('#chatNew').click();
-    await openProjectFromTopButton();
+    await openProjectSettings();
     assert.equal(await page.locator('#chatRemoteUrl').inputValue(), repository.remote_url);
+    await finishProjectSettings();
     await page.locator('#chatQuestion').fill('为新任务同步最新远程分支，先预览本次代码范围。');
     // Sending a new task must fetch automatically even without an explicit update click.
     await page.locator('#chatSend').click();
@@ -291,7 +313,7 @@ async function projectRepositoryRegression(browser, terminalRequests) {
 
     await page.reload();
     await page.locator('#chatCapability').filter({hasText:'共享模型已配置'}).waitFor();
-    await openProjectFromTopButton();
+    await openProjectSettings();
     assert.equal(await page.locator('#chatRemoteUrl').inputValue(), repository.remote_url,
       'refresh should retain the chosen Git URL');
     await page.waitForFunction(id => document.querySelector('#chatRepository').value === id, cached.id);
@@ -304,6 +326,7 @@ async function projectRepositoryRegression(browser, terminalRequests) {
       document.querySelector('#chatBranch').value === branch, repository.branch);
     assert.equal((await (await page.request.get('http://127.0.0.1:8879/api/chat/projects')).json()).repositories.length, 1,
       'repeated updates of a remembered URL must reuse its managed clone');
+    await finishProjectSettings();
     await sessionLoadRecoveryRegression(page, sessionId, history.session.task.project);
     page.on('dialog', dialog => dialog.accept());
     await page.locator('#chatDelete').click();

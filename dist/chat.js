@@ -56,10 +56,10 @@
     const projectState=restoring?'正在恢复会话的项目设置…':useCode?(syncing?'正在同步…':linked?repositoryName+' · '+$('#chatBranch').value:'待选择仓库'):'未关联 · 当前仅分析日志';
     $('#chatOpenProject').disabled=restoring||busy||submitting;
     $('#chatOpenProject').classList.toggle('is-linked',linked);
-    $('#chatProjectBanner').classList.toggle('is-linked',linked);
+    $('#chatProjectEntry').classList.toggle('is-linked',linked);
     $('#chatOpenProject').setAttribute('aria-expanded',String($('#chatProjectOptions').open));
     $('#chatOpenProject').title=useCode?'项目代码 · '+projectState:'关联 Git 仓库，让 AI 结合项目代码定位问题';
-    $('#chatProjectButtonLabel').textContent=linked?'项目代码设置':'关联项目代码';
+    $('#chatProjectButtonLabel').textContent='项目代码设置';
     $('#chatProjectButtonState').textContent=projectState;
     $('#chatProjectButtonState').title=projectState;
   }
@@ -220,14 +220,13 @@
   $('#chatPreviewEnabled').addEventListener('change',()=>storage('logscope.chat.preview',String($('#chatPreviewEnabled').checked)));
   $('#chatUseCode').addEventListener('change',()=>{if(syncing)resetProject();else invalidatePreview();controls();});
   $('#chatOpenProject').addEventListener('click',()=>{
-    if(busy||submitting)return;
-    $('#chatProjectOptions').open=true;
+    if(busy||submitting||(selected&&!current))return;
+    if(!$('#chatProjectOptions').open)$('#chatProjectOptions').showModal();
     if(!$('#chatUseCode').checked){$('#chatUseCode').checked=true;$('#chatUseCode').dispatchEvent(new Event('change'));}
     else controls();
-    $('#chatProjectOptions').scrollIntoView({behavior:'smooth',block:'center'});
     (remoteUrl()?$('#chatRepository'):$('#chatRemoteUrl')).focus({preventScroll:true});
   });
-  $('#chatProjectOptions').addEventListener('toggle',()=>$('#chatOpenProject').setAttribute('aria-expanded',String($('#chatProjectOptions').open)));
+  $('#chatProjectOptions').addEventListener('close',()=>$('#chatOpenProject').setAttribute('aria-expanded','false'));
   $('#chatRemoteUrl').addEventListener('input',()=>{resetProject();renderRepositories();controls();});
   $('#chatRepository').addEventListener('change',()=>{const repo=repositories.find(item=>item.id===$('#chatRepository').value);resetProject();$('#chatRemoteUrl').value=repo?.remote_url||'';controls();});
   $('#chatRefreshProjects').addEventListener('click',()=>refreshProjects().catch(e=>toast(e.message)));
