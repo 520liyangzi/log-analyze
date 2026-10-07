@@ -12,6 +12,33 @@ function trackTerminalRequests(page, requests) {
   });
 }
 
+async function reloadWithDelayedChat(page, sessionId) {
+  // A defer script may still be downloading when an earlier script's timer runs.
+  // Hold chat.js until app.js restored state and its queued zero-delay work ran;
+  // startup must still restore the chat without requiring a navigation click.
+  let releaseChat;
+  const chatReady = new Promise(resolve => { releaseChat = resolve; });
+  const holdChat = async route => { await chatReady; await route.continue(); };
+  await page.route('**/chat.js', holdChat);
+  try {
+    const requested = page.waitForRequest(request => new URL(request.url()).pathname === '/chat.js');
+    await page.reload({waitUntil:'commit'});
+    await requested;
+    await page.waitForFunction(() => typeof state !== 'undefined' && state.uiRestored);
+    // This is an event-loop barrier, not a timing-dependent sleep.
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
+    releaseChat();
+    await page.waitForLoadState('domcontentloaded');
+    await page.locator('#chatCapability').filter({hasText:'共享模型已配置'}).waitFor();
+    await page.locator(`[data-chat-session="${sessionId}"].active`).waitFor();
+    await page.locator('#chatMessages').filter({hasText:'是否有下游连接池异常？'}).waitFor();
+    await page.waitForFunction(() => document.querySelector('#chatQuestion').value === '保留未发送草稿');
+  } finally {
+    releaseChat();
+    await page.unroute('**/chat.js', holdChat);
+  }
+}
+
 async function legacyViewRegression(browser, sourcePage, terminalRequests) {
   const datasets = await (await sourcePage.request.get('http://127.0.0.1:8879/api/datasets')).json();
   const dataset = datasets.find(item => item.state === 'ready');
@@ -218,15 +245,16 @@ async function maintenanceRegression(browser, sourcePage, terminalRequests) {
     await page.locator('#chatMessages').filter({hasText:'继续查看上下文可以验证该请求是否受下游连接池影响'}).waitFor();
     await page.reload();
     await page.locator('#chatMessages').filter({hasText:'是否有下游连接池异常？'}).waitFor();
+    const sessionId = await page.locator('[data-chat-session].active').getAttribute('data-chat-session');
+    assert(sessionId, 'restored conversation must appear as the active saved session');
     await page.locator('#chatQuestion').fill('保留未发送草稿');
-    await page.reload();
-    await page.waitForFunction(()=>document.querySelector('#chatQuestion').value==='保留未发送草稿');
+    await reloadWithDelayedChat(page, sessionId);
     await page.locator('#chatRules').click();
     await page.locator('#rulesDialog[open]').waitFor();
     await page.locator('#rulesDialog .close').click();
     await page.locator('#chatNew').click();
     await page.locator('#chatTitle').filter({hasText:'新建排查'}).waitFor();
-    await page.locator('[data-chat-session]').first().click();
+    await page.locator(`[data-chat-session="${sessionId}"]`).click();
     await page.locator('#chatMessages').filter({hasText:'是否有下游连接池异常？'}).waitFor();
     await page.setViewportSize({width:390,height:844});
     await page.screenshot({path:'test-results/chat-mobile.png',fullPage:true});
@@ -237,7 +265,7 @@ async function maintenanceRegression(browser, sourcePage, terminalRequests) {
     await page.locator('#chatTitle').filter({hasText:'新建排查'}).waitFor();
     assert.equal(await page.locator('[data-chat-session]').count(),0);
     assert.deepEqual(terminalRequests, [], 'all browser flows must avoid removed terminal APIs');
-    console.log('Browser regression passed: maintenance 503/drafts/progress/cancel/recovery, retained ZIP/download, terminal-view migration, no terminal API requests, native rules save/preview, tools, evidence, follow-up, reload, drafts, sessions, mobile, delete.');
+    console.log('Browser regression passed: maintenance 503/drafts/progress/cancel/recovery, retained ZIP/download, terminal-view migration, no terminal API requests, native rules save/preview, tools, evidence, follow-up, delayed chat startup/reload, drafts, sessions, mobile, delete.');
   } catch(error) {
     await page.screenshot({path:'test-results/chat-failure.png',fullPage:true});
     throw error;

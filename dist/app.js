@@ -514,7 +514,11 @@ for(const [id,key] of [['collectPod','pod'],['collectStart','start'],['collectEn
 state.view = savedUI.view || 'search';
 state.uiRestored = true;
 clearResults();
-setTimeout(() => setView(state.view), 0);
+// A zero-delay timer can run while a later deferred module is still downloading.
+// Publish the restored view only after all deferred modules registered listeners.
+const restoreInitialView = () => setView(state.view);
+if (document.readyState === 'complete') restoreInitialView();
+else document.addEventListener('DOMContentLoaded', restoreInitialView, {once:true});
 $('#datasetLoadRetry').addEventListener('click', () => { void refreshDatasets().catch(() => {}); });
 let importResumeTimer;
 document.addEventListener('logscope:datasets', event => {
