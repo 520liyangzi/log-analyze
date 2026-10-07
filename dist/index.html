@@ -21,7 +21,7 @@
   <button id="sideEnvironments" class="outline wide">⚙ 采集环境管理</button>
   <button id="deleteDataset" class="danger-outline wide" disabled>删除当前日志包</button>
   <div class="retention-summary"><strong>日志包与索引保留 72 小时</strong><p>本地 02:00 清理 · 默认不补扫</p><small id="retentionStatus" role="status">正在读取清理计划…</small><button id="retainedArchives" class="text-button">查看遗留 ZIP <span id="retainedCount">0</span></button></div>
-  <div class="side-bottom"><div class="local-badge"><span></span> 本机索引 · 原生 AI 对话</div><p>日志在本机检索；AI 仅接收命中片段，使用维护者配置的共享模型。</p><div class="version">LOGSCOPE <span>v2.5</span></div></div>
+  <div class="side-bottom"><div class="local-badge"><span></span> 本机索引 · 原生 AI 对话</div><p>日志在本机检索；AI 仅接收命中片段，使用维护者配置的共享模型。</p><div class="version">LOGSCOPE <span>v2.5.1</span></div></div>
 </aside>
 <main>
   <header class="topbar"><div><span class="breadcrumb">工作空间</span><span class="slash">/</span><span id="viewLabel">全局搜索</span></div><span class="quiet">本机离线索引</span></header>
@@ -46,7 +46,7 @@
     <section id="traceView" hidden><form id="traceForm" class="search-panel"><div class="search-tabs"><span class="selected">请求时间线</span><span class="subtle">按完整流水号跨节点匹配</span></div><div class="search-main"><span class="search-symbol">⑂</span><input id="traceId" placeholder="输入流水号，例如 9124859898865451127" aria-label="流水号" required><button class="primary">追踪请求 →</button></div><p class="form-note">按日志时间排列所有命中记录；不含流水号的 access 日志，可通过时间与线程另行关联。</p></form><div id="traceResults"></div></section>
     <section id="filesView" hidden><div class="file-toolbar"><h2>日志来源目录</h2><input id="fileSearch" placeholder="筛选 Pod、日志名或压缩包" aria-label="筛选日志文件"></div><div id="fileList"></div></section>
     <section id="chatView" hidden>
-      <div class="chat-topline"><span class="chat-status-dot"></span><span id="chatCapability">正在检查模型配置…</span><button id="chatRefreshConfig" class="text-button">刷新状态</button><button id="chatRules" class="text-button">分析规则</button></div>
+      <div class="chat-topline"><span class="chat-status-dot"></span><span id="chatCapability">正在检查模型配置…</span><button id="chatRefreshConfig" class="text-button">刷新状态</button><button id="chatOpenProject" class="chat-project-button" type="button" aria-controls="chatProjectOptions" aria-expanded="false"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 5-6 7 6 7m8-14 6 7-6 7m-3-16-2 20"/></svg><strong id="chatProjectButtonLabel">关联项目代码</strong><span id="chatProjectButtonState">未关联</span></button><button id="chatRules" class="text-button">分析规则</button></div>
       <div class="chat-layout">
         <aside class="chat-sidebar"><div class="chat-sidebar-heading"><strong>排查会话</strong><button id="chatNew" class="primary">＋ 新建</button></div><p>组内共享 · 自动保存 · 最多 3 个并行任务</p><div id="chatSessionList" class="chat-session-list"></div><button id="chatRefresh" class="text-button">刷新会话列表</button></aside>
         <div class="chat-main">

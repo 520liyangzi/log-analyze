@@ -47,6 +47,14 @@
     $('#chatBranch').disabled=!project||syncing||busy||running();
     $('#chatRemoteUrl').disabled=submitting;$('#chatRepository').disabled=submitting;$('#chatUseCode').disabled=submitting;
     $('#chatProjectNote').dataset.working=String(syncing);
+    const useCode=$('#chatUseCode').checked, fixedProject=current?.task.project&&!projectDirty;
+    const projectState=useCode?(syncing?'正在同步…':project||fixedProject?$('#chatBranch').value:'待选择仓库'):'未关联';
+    $('#chatOpenProject').disabled=busy||submitting;
+    $('#chatOpenProject').classList.toggle('is-linked',Boolean(useCode&&(project||fixedProject)));
+    $('#chatOpenProject').setAttribute('aria-expanded',String($('#chatProjectOptions').open));
+    $('#chatOpenProject').title=useCode?'项目代码 · '+projectState:'关联 Git 仓库，让 AI 结合项目代码定位问题';
+    $('#chatProjectButtonLabel').textContent=useCode?'项目代码':'关联项目代码';
+    $('#chatProjectButtonState').textContent=projectState;
   }
   function renderSessions(){
     $('#chatSessionList').innerHTML=sessions.length?sessions.map(s=>`<button class="chat-session ${s.id===selected?'active':''}" data-chat-session="${s.id}"><span class="chat-session-title">${escapeHTML(s.title)}</span><span><i class="${s.state==='running'?'live':''}"></i>${states[s.state]||s.state} · ${escapeHTML(s.task.name)}</span></button>`).join(''):'<div class="chat-list-empty">暂无排查会话<br>发出第一个问题后自动保存</div>';
@@ -182,6 +190,15 @@
   $('#chatPreviewEnabled').checked=storage('logscope.chat.preview')!=='false';
   $('#chatPreviewEnabled').addEventListener('change',()=>storage('logscope.chat.preview',String($('#chatPreviewEnabled').checked)));
   $('#chatUseCode').addEventListener('change',()=>{if(syncing)resetProject();else invalidatePreview();controls();});
+  $('#chatOpenProject').addEventListener('click',()=>{
+    if(busy||submitting)return;
+    $('#chatProjectOptions').open=true;
+    if(!$('#chatUseCode').checked){$('#chatUseCode').checked=true;$('#chatUseCode').dispatchEvent(new Event('change'));}
+    else controls();
+    $('#chatProjectOptions').scrollIntoView({behavior:'smooth',block:'center'});
+    (remoteUrl()?$('#chatRepository'):$('#chatRemoteUrl')).focus({preventScroll:true});
+  });
+  $('#chatProjectOptions').addEventListener('toggle',()=>$('#chatOpenProject').setAttribute('aria-expanded',String($('#chatProjectOptions').open)));
   $('#chatRemoteUrl').addEventListener('input',()=>{resetProject();renderRepositories();controls();});
   $('#chatRepository').addEventListener('change',()=>{const repo=repositories.find(item=>item.id===$('#chatRepository').value);resetProject();$('#chatRemoteUrl').value=repo?.remote_url||'';controls();});
   $('#chatRefreshProjects').addEventListener('click',()=>refreshProjects().catch(e=>toast(e.message)));

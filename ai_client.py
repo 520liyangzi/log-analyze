@@ -120,7 +120,9 @@ class ModelConfig:
                 raise invalid(f'{key} 必须是字符串，且不能包含换行或回车')
         if not isinstance(config['stream'], bool):
             raise invalid('stream 必须是 true 或 false，不能加引号')
-        for key, low, high in (('timeout_seconds', 5, 600), ('max_output_tokens', 256, 16000),
+        if type(config['max_output_tokens']) is not int or config['max_output_tokens'] <= 0:
+            raise invalid('max_output_tokens 必须是正整数，不能加引号；实际支持上限由模型接口决定')
+        for key, low, high in (('timeout_seconds', 5, 600),
                                ('max_tool_rounds', 1, 20), ('max_context_chars', 20000, 500000)):
             if type(config[key]) is not int or not low <= config[key] <= high:
                 raise invalid(f'{key} 必须是 {low}–{high} 之间的整数，不能加引号')
@@ -224,6 +226,9 @@ class ModelClient:
         else:
             headers['Authorization'] = 'Bearer ' + self.config['api_key']
         timeout = self.config['timeout_seconds']
+        # SSE framing can outweigh generated text. Scale the wire budget with
+        # the configured output allowance; 4096 tokens keeps the original 2 MiB.
+        response_limit = max(2 * 1024 * 1024, self.config['max_output_tokens'] * 512)
         # http.client connects directly: environment/system proxy settings are
         # unused rather than routing internal endpoints through a configured proxy.
         factory = http.client.HTTPSConnection if parsed.scheme == 'https' else http.client.HTTPConnection
@@ -265,8 +270,8 @@ class ModelClient:
                     reason = '请检查模型配置、接口协议和工具调用支持'
                 raise ValueError(f'模型接口返回 HTTP {response.status}：{reason}；服务端原始错误不回显。')
             if 'text/event-stream' not in response.getheader('Content-Type', ''):
-                raw = response.read(2 * 1024 * 1024 + 1)
-                if len(raw) > 2 * 1024 * 1024:
+                raw = response.read(response_limit + 1)
+                if len(raw) > response_limit:
                     raise ValueError('模型单次响应超过大小限制')
                 data = json.loads(raw)
                 if anthropic:
@@ -283,11 +288,15 @@ class ModelClient:
                     finish = choice.get('finish_reason')
             else:
                 size = 0
-                for line in response:
+                while True:
+                    # Bound each line as well as the accumulated wire bytes.
+                    line = response.readline(response_limit - size + 1)
+                    if not line:
+                        break
                     if self.stop.is_set():
                         raise Cancelled()
                     size += len(line)
-                    if size > 2 * 1024 * 1024 or time.monotonic() - started > timeout:
+                    if size > response_limit or time.monotonic() - started > timeout:
                         raise ValueError('模型响应超过时间或大小限制，请重试或缩小问题范围')
                     if not line.startswith(b'data:'):
                         continue

@@ -20,6 +20,7 @@ class LocalEndpoint:
         self.requests = []
         self.status = 200
         self.raw = None
+        self.raw_content_type = 'application/json'
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -31,7 +32,7 @@ class LocalEndpoint:
                 owner.requests.append((self.path, body))
                 response = dict(choices=[dict(message=dict(content='local model reply'), finish_reason='stop')])
                 if owner.raw is not None:
-                    raw, content_type = owner.raw, 'application/json'
+                    raw, content_type = owner.raw, owner.raw_content_type
                 elif body.get('stream'):
                     response['choices'][0]['delta'] = response['choices'][0].pop('message')
                     raw = ('data: ' + json.dumps(response) + '\n\ndata: [DONE]\n\n').encode()
@@ -42,7 +43,10 @@ class LocalEndpoint:
                 self.send_header('Content-Type', content_type)
                 self.send_header('Content-Length', str(len(raw)))
                 self.end_headers()
-                self.wfile.write(raw)
+                try:
+                    self.wfile.write(raw)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # The client deliberately closes over-budget responses.
 
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         self.url = f'http://127.0.0.1:{self.server.server_port}/v1'
@@ -139,7 +143,7 @@ class ModelConfigTests(unittest.TestCase):
                 self.assert_private_error(field)
 
     def test_numeric_limits_and_strict_integer_types_are_preserved(self):
-        for field, low, high in (('timeout_seconds', 5, 600), ('max_output_tokens', 256, 16000),
+        for field, low, high in (('timeout_seconds', 5, 600),
                                  ('max_tool_rounds', 1, 20), ('max_context_chars', 20000, 500000)):
             for value in (str(low), float(low), True, None, low - 1, high + 1):
                 with self.subTest(field=field, value=value):
@@ -148,6 +152,20 @@ class ModelConfigTests(unittest.TestCase):
             for value in (low, high):
                 self.write(**{field: value})
                 self.assertEqual(self.config.load()[field], value)
+
+    def test_output_token_budget_accepts_positive_integers_without_application_ceiling(self):
+        self.write()
+        self.assertEqual(self.config.load()['max_output_tokens'], 4096)
+        for value in (1, 255, 16000, 16001, 65536, 131072):
+            with self.subTest(value=value):
+                self.write(max_output_tokens=value)
+                self.assertEqual(self.config.load()['max_output_tokens'], value)
+
+    def test_output_token_budget_rejects_zero_negative_and_noninteger_values(self):
+        for value in (0, -1, True, False, 1.0, 65536.0, '65536', None, [], {}):
+            with self.subTest(value=value):
+                self.write(max_output_tokens=value)
+                self.assert_private_error('max_output_tokens.*正整数')
 
     def test_json_error_positions_and_windows_escape_hint_are_safe(self):
         self.config.path.write_text('{' + '\n"api_key": "unit-secret-do-not-display",\n}', 'utf-8')
@@ -205,6 +223,75 @@ class ModelConnectionDiagnosticsTests(unittest.TestCase):
                     self.assertFalse(limited)
             self.assertEqual([path for path, body in model.requests], ['/v1/chat/completions'] * 2)
             self.assertEqual(proxy.requests, [])
+
+    def test_large_output_budget_reaches_each_protocol_unchanged(self):
+        with LocalEndpoint() as model, LocalEndpoint() as proxy, tempfile.TemporaryDirectory() as directory:
+            config = ModelConfig(Path(directory))
+            proxy.status = 407
+            env = {key: proxy.url for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY',
+                                               'http_proxy', 'https_proxy', 'all_proxy')}
+            env.update(NO_PROXY='', no_proxy='')
+            with mock.patch.dict(os.environ, env):
+                for provider, parameter in (('openai', 'max_tokens'), ('openai', 'max_completion_tokens'),
+                                             ('anthropic', 'max_completion_tokens')):
+                    with self.subTest(provider=provider, parameter=parameter):
+                        config.path.write_text(json.dumps(dict(base_url=model.url, api_key=self.secret,
+                                                              model='unit-model', stream=False, provider=provider,
+                                                              openai_token_parameter=parameter,
+                                                              max_output_tokens=65536)), 'utf-8')
+                        model.raw = (json.dumps(dict(content=[dict(type='text', text='local model reply')],
+                                                    stop_reason='end_turn')).encode()
+                                     if provider == 'anthropic' else None)
+                        result, limited = self.complete(ModelClient(config.load(), threading.Event()))
+                        self.assertEqual(result['content'], 'local model reply')
+                        self.assertFalse(limited)
+                        path, payload = model.requests[-1]
+                        expected = 'max_tokens' if provider == 'anthropic' else parameter
+                        self.assertEqual(payload[expected], 65536)
+                        self.assertNotIn('max_output_tokens', payload)
+                        self.assertNotIn('max_completion_tokens' if expected == 'max_tokens' else 'max_tokens', payload)
+                        self.assertEqual(path, '/v1/messages' if provider == 'anthropic' else '/v1/chat/completions')
+            self.assertEqual(proxy.requests, [])
+
+    @staticmethod
+    def large_sse():
+        # SSE framing/metadata can exceed 2 MiB even when generated text is short.
+        event = dict(choices=[dict(index=0, delta=dict(content='x'), finish_reason=None)],
+                     padding='p' * 32768)
+        frame = ('data: ' + json.dumps(event) + '\n\n').encode()
+        end = ('data: ' + json.dumps(dict(choices=[dict(index=0, delta={}, finish_reason='stop')]))
+               + '\n\ndata: [DONE]\n\n').encode()
+        return frame * 65 + end
+
+    def test_large_output_budget_accepts_more_than_two_mib_of_sse_framing(self):
+        with LocalEndpoint() as model:
+            model.raw, model.raw_content_type = self.large_sse(), 'text/event-stream'
+            self.assertGreater(len(model.raw), 2 * 1024 * 1024)
+            result, limited = self.complete(self.client(model.url, stream=True, max_output_tokens=65536))
+            self.assertEqual(result['content'], 'x' * 65)
+            self.assertFalse(limited)
+            self.assertEqual(model.requests[-1][1]['max_tokens'], 65536)
+
+    def test_large_output_budget_accepts_more_than_two_mib_of_json(self):
+        with LocalEndpoint() as model:
+            content = 'x' * (2 * 1024 * 1024 + 128)
+            model.raw = json.dumps(dict(choices=[dict(message=dict(content=content), finish_reason='stop')])).encode()
+            result, limited = self.complete(self.client(model.url, stream=False, max_output_tokens=65536))
+            self.assertEqual(result['content'], content)
+            self.assertFalse(limited)
+
+    def test_default_output_budget_still_rejects_oversized_responses(self):
+        with LocalEndpoint() as model:
+            cases = [('text/event-stream', self.large_sse()),
+                     ('text/event-stream', b'data: ' + b'p' * (2 * 1024 * 1024 + 128) + b'\n'),
+                     ('application/json', b'p' * (2 * 1024 * 1024 + 128))]
+            for content_type, raw in cases:
+                with self.subTest(content_type=content_type, single_line=b'\n\n' not in raw):
+                    model.raw, model.raw_content_type = raw, content_type
+                    client = self.client(model.url, stream=content_type == 'text/event-stream')
+                    self.assertEqual(client.config['max_output_tokens'], 4096)
+                    with self.assertRaisesRegex(ValueError, '响应.*大小限制'):
+                        self.complete(client)
 
     def test_http_status_diagnostics_hide_response_body(self):
         with LocalEndpoint() as model:
