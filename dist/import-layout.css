@@ -6,7 +6,12 @@
 .import-review-queue>p{margin:0 0 12px;color:var(--muted);font-size:.8rem}
 #importReviewTasks{display:grid;gap:10px}
 .import-review-task{display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;padding:13px 15px;background:#f7faff;border:1px solid #e2eafa;border-radius:8px;font-size:.8rem;min-width:0}
-.import-review-task>div{flex:1;min-width:180px;max-width:100%}
+.import-review-task-info{flex:1;min-width:180px;max-width:100%}
+.import-review-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:100%}
+.import-review-task .import-cancel-button{color:#af3c50;border:1px solid #e9bec8;background:#fff4f6;font-weight:600}
+.import-review-task .import-cancel-button:hover:not(:disabled){color:#98293e;border-color:#cd8092;background:#ffe9ee}
+.import-review-task button:disabled{cursor:not-allowed;opacity:.6}
+.import-cancel-error{margin:5px 0 0;color:#a53d50;font-size:.75rem;line-height:1.7;overflow-wrap:anywhere}
 .import-review-task strong{display:block;font-size:.85rem;font-weight:600;overflow-wrap:anywhere;line-height:1.6}
 .import-review-task>strong{flex:1;min-width:160px}
 .import-review-task span{color:var(--muted);line-height:1.7;overflow-wrap:anywhere}
@@ -88,7 +93,8 @@
 @media(max-width:640px){
   .import-review-queue{padding:15px}
   .import-review-task{padding:12px;gap:8px 10px}
-  .import-review-task>div{min-width:0;flex-basis:100%}
+  .import-review-task-info,.import-review-actions{min-width:0;flex-basis:100%}
+  .import-review-actions button{flex:1;white-space:normal}
   .import-layout-dialog{width:calc(100% - 16px);max-height:94vh;max-height:94dvh;padding:18px;border-radius:11px}
   .import-layout-dialog .dialog-heading{gap:10px}
   .import-layout-dialog .dialog-heading h2{font-size:1.05rem}

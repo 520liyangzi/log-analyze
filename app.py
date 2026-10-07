@@ -503,11 +503,13 @@ class Store:
         return archive, row['name']
 
     @dataset_lifecycle
-    def request_delete(self, identifier, compact=False):
+    def request_delete(self, identifier, compact=False, import_only=False):
         with self.connect() as db:
             row = db.execute('SELECT state FROM datasets WHERE id=?', (identifier,)).fetchone()
             if not row:
                 raise ValueError('日志包不存在或已经删除')
+            if import_only and row['state'] not in ('review', 'failed', 'deleting'):
+                raise ImportConflict('任务状态已更新，当前不能取消导入；请刷新后查看。已完成的日志包可通过“删除当前日志包”管理。')
             if row['state'] in ('importing', 'scanning'):
                 raise ValueError('日志包正在扫描或导入，完成后再删除')
             if row['state'] == 'deleting':
@@ -769,7 +771,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/2.5.6'
+    server_version = 'LogScope/2.5.7'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -964,7 +966,8 @@ class Handler(BaseHTTPRequestHandler):
                     with self.store.lifecycle_lock:
                         if self.server.chats.dataset_in_use(identifier):
                             raise ValueError('该日志包正在被原生 AI 排查使用，请先停止对应会话')
-                        self.store.request_delete(identifier, body.get('compact') is True)
+                        self.store.request_delete(identifier, body.get('compact') is True,
+                                                  import_only=body.get('import_only') is True)
                     self.json({'ok': True, 'id': identifier}, 202)
                 else:
                     self.json({'error':'不存在'}, 404)

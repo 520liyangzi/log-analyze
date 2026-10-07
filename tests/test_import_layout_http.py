@@ -245,17 +245,33 @@ class ImportLayoutHTTPTests(unittest.TestCase):
             identifier = self.upload(make_simple_zip())
             self.assertEqual(self.api('/api/datasets')[1][0]['state'], 'scanning')
             self.assert_api_error(400, '/api/datasets/delete', {'dataset': identifier})
+            self.assert_api_error(409, '/api/datasets/delete',
+                                  {'dataset': identifier, 'import_only': True}, code='IMPORT_CONFLICT')
             self.assert_api_error(409, '/api/imports/confirm', {'dataset': identifier, 'revision': 0}, code='IMPORT_CONFLICT')
         finally:
             released.set()
         self.wait_state(identifier)
         self.assert_no_index(identifier)
-        self.assertEqual(self.api('/api/datasets/delete', {'dataset': identifier})[0], 202)
+        self.assertEqual(self.api('/api/datasets/delete',
+                                 {'dataset': identifier, 'import_only': True, 'compact': False})[0], 202)
         self.server.store.pool.submit(lambda: None).result(timeout=15)
         _, datasets = self.api('/api/datasets')
         self.assertFalse(any(row['id'] == identifier for row in datasets))
         self.assertFalse((self.server.store.directory / 'archives' / (identifier + '.zip')).exists())
+        self.assertFalse((self.server.store.directory / 'import-plans' / (identifier + '.json')).exists())
         self.assert_api_error(400, '/api/imports/preview?dataset=' + identifier)
+
+    def test_stale_import_cancellation_does_not_delete_a_completed_package(self):
+        identifier = self.upload(make_simple_zip())
+        self.wait_state(identifier)
+        self.api('/api/imports/confirm', self.body(self.preview(identifier)))
+        self.wait_state(identifier, 'ready')
+        self.assert_api_error(409, '/api/datasets/delete',
+                              {'dataset': identifier, 'import_only': True}, code='IMPORT_CONFLICT')
+        self.assertEqual(self.wait_state(identifier, 'ready')['state'], 'ready')
+        self.assertTrue((self.server.store.directory / 'archives' / (identifier + '.zip')).exists())
+        self.assertTrue((self.server.store.directory / 'import-plans' / (identifier + '.json')).exists())
+        self.assertEqual(self.api('/api/search?dataset=' + identifier + '&q=fixture-simple')[1]['summary']['total'], 1)
 
     def test_import_endpoints_keep_host_and_origin_boundary(self):
         identifier = self.upload(make_simple_zip())

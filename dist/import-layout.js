@@ -5,6 +5,7 @@
   const editableStates = new Set(['review', 'failed']);
   const taskStates = new Set(['scanning', 'review', 'importing', 'failed']);
   const fields = ['included','patterns','node','namespace','pod','service','kind','line_mode'];
+  const activeTasks = new Set(), cancellations = new Map(), cancelErrors = new Map();
   let current = null, generation = 0, pollTimer, localTimer, queuePage = 1;
 
   function taskRows() { return state.datasets.filter(row => taskStates.has(row.state) && (row.layout_available || ['scanning','review'].includes(row.state))); }
@@ -53,7 +54,7 @@
   }
   function updateButtons() {
     if (!current) return;
-    const editable=editableStates.has(current.plan?.state), busy=current.busy;
+    const editable=editableStates.has(current.plan?.state), busy=current.busy||activeTasks.has(current.id)||cancellations.has(current.id);
     $('#layoutEditorFields').disabled=busy||!editable||current.conflict;
     $('#layoutTaskPicker').disabled=busy;
     $('#layoutSave').disabled=busy||!editable||current.conflict;
@@ -61,6 +62,7 @@
     $('#layoutReload').disabled=busy;
     $('#layoutRescan').hidden=!editable;$('#layoutRescan').disabled=busy||current.conflict;
     $('#layoutDiscard').disabled=busy||!editable;
+    $('#layoutDiscard').textContent=cancellations.has(current.id)?'正在取消…':'取消导入';
     $('#layoutConfirm').textContent=busy&&current.action==='confirm'?'正在提交…':'确认并建立索引 →';
     $('#layoutEncodingNotice').textContent=encodingNeedsScan()?'编码已更改：请点击“重新扫描”更新样例与文件识别，再确认建立索引。可以先保存草稿。':'更改编码后，请重新扫描以更新样例与文件识别。';
     $('#layoutEncodingNotice').classList.toggle('layout-warnings',encodingNeedsScan());
@@ -110,15 +112,63 @@
   }
   function renderPicker() {
     if(!current)return;
-    const rows=taskRows();if(!rows.some(row=>row.id===current.id))rows.unshift({id:current.id,name:current.plan?.name||current.id,state:current.plan?.state||'scanning'});
+    const rows=taskRows().filter(row=>row.id===current.id||!cancellations.has(row.id));if(!rows.some(row=>row.id===current.id))rows.unshift({id:current.id,name:current.plan?.name||current.id,state:current.plan?.state||'scanning'});
     $('#layoutTaskPicker').innerHTML=rows.map(row=>`<option value="${escapeHTML(row.id)}">${escapeHTML(row.name)} · ${escapeHTML(label(row.state))}</option>`).join('');
     $('#layoutTaskPicker').value=current.id;
   }
   function renderQueue() {
-    const rows=taskRows(),pages=Math.max(1,Math.ceil(rows.length/10));queuePage=Math.min(queuePage,pages);
+    const rows=taskRows();
+    for(const [id,task] of cancellations)if(!rows.some(row=>row.id===id))rows.push(task.row);
+    const pages=Math.max(1,Math.ceil(rows.length/10));queuePage=Math.min(queuePage,pages);
     $('#importReviewQueue').hidden=!rows.length;
-    $('#importReviewTasks').innerHTML=rows.slice((queuePage-1)*10,queuePage*10).map(row=>`<div class="import-review-task"><div><strong>${escapeHTML(row.name)}</strong><span>${escapeHTML(label(row.state))} · 原 ZIP ${formatBytes(row.archive_bytes)}</span></div><button type="button" class="quiet" data-import-open="${escapeHTML(row.id)}">${row.state==='review'?'确认导入范围':row.state==='failed'?'查看并重试':'查看进度'}</button></div>`).join('')+(pages>1?`<div class="layout-pagination"><button type="button" data-import-queue-page="${queuePage-1}" ${queuePage===1?'disabled':''}>上一页</button><span>第 ${queuePage} / ${pages} 页</span><button type="button" data-import-queue-page="${queuePage+1}" ${queuePage===pages?'disabled':''}>下一页</button></div>`:'');
+    $('#importReviewTasks').innerHTML=rows.slice((queuePage-1)*10,queuePage*10).map(row=>{
+      const cancelling=cancellations.has(row.id),busy=cancelling||activeTasks.has(row.id)||(current?.id===row.id&&dialog.open&&current.busy);
+      return `<div class="import-review-task" data-import-task="${escapeHTML(row.id)}" aria-busy="${busy}"><div class="import-review-task-info"><strong>${escapeHTML(row.name)}</strong><span>${cancelling?'正在取消，等待清理此任务…':escapeHTML(label(row.state))} · 原 ZIP ${formatBytes(row.archive_bytes)}</span>${cancelErrors.has(row.id)?`<p class="import-cancel-error" role="status">${escapeHTML(cancelErrors.get(row.id))}</p>`:''}</div><div class="import-review-actions"><button type="button" class="quiet" data-import-open="${escapeHTML(row.id)}" ${busy?'disabled':''}>${row.state==='review'?'确认导入范围':row.state==='failed'?'查看并重试':'查看进度'}</button>${editableStates.has(row.state)||cancelling?`<button type="button" class="danger-outline import-cancel-button" data-import-cancel="${escapeHTML(row.id)}" ${busy?'disabled':''}>${cancelling?'正在取消…':'取消导入'}</button>`:''}</div></div>`;
+    }).join('')+(pages>1?`<div class="layout-pagination"><button type="button" data-import-queue-page="${queuePage-1}" ${queuePage===1?'disabled':''}>上一页</button><span>第 ${queuePage} / ${pages} 页</span><button type="button" data-import-queue-page="${queuePage+1}" ${queuePage===pages?'disabled':''}>下一页</button></div>`:'');
     if(dialog.open)renderPicker();
+  }
+  function cancellationFailed(id,message) {
+    const task=cancellations.get(id);if(!task)return;
+    clearTimeout(task.timer);cancellations.delete(id);cancelErrors.set(id,message);
+    if(current?.id===id){current.busy=false;current.action='';if(dialog.open){setMessage(message,'error');updateButtons();}}
+    renderQueue();toast(message);
+  }
+  async function pollCancellation(id) {
+    const task=cancellations.get(id);if(!task)return;
+    try{
+      const rows=await refreshDatasets();
+      if(cancellations.get(id)!==task)return;
+      if(Array.isArray(rows)){
+        const row=rows.find(item=>item.id===id);
+        if(!row){
+          cancellations.delete(id);cancelErrors.delete(id);discardLocal(id);
+          if(current?.id===id){clearTimeout(localTimer);current.dirty=false;current.busy=false;if(current.plan)current.plan.state='missing';if(dialog.open)dialog.close();}
+          renderQueue();toast(`已取消导入“${task.row.name}”，该任务的 ZIP、草稿和残留索引已删除`);return;
+        }
+        if(row.state!=='deleting'){cancellationFailed(id,'取消失败：'+(row.error||'任务状态已变化，请刷新后重试'));return;}
+        cancelErrors.delete(id);
+      }
+    }catch(error){
+      if(cancellations.get(id)!==task)return;
+      cancelErrors.set(id,'暂时无法确认取消结果，正在自动重试：'+error.message);renderQueue();
+    }
+    task.timer=setTimeout(()=>{void pollCancellation(id);},1500);
+  }
+  async function cancelImport(identifier) {
+    const id=String(identifier),row=state.datasets.find(item=>item.id===id)||(current?.id===id?current.plan:null);
+    if(!row||!editableStates.has(row.state)||activeTasks.has(id)||cancellations.has(id)||(current?.id===id&&dialog.open&&current.busy))return;
+    if(!confirm(`确定取消导入“${row.name}”？将删除该任务上传的 ZIP、导入方案（含草稿）和残留索引，不影响其它日志包。此操作不能撤销。`))return;
+    const task={row:{...row,id},timer:null};cancellations.set(id,task);cancelErrors.delete(id);
+    if(current?.id===id){current.busy=true;current.action='cancel';if(dialog.open){setMessage('正在取消导入并清理该任务…');updateButtons();}}
+    renderQueue();
+    try{
+      await api('/api/datasets/delete',{dataset:id,compact:false,import_only:true});
+      if(current?.id===id&&dialog.open)dialog.close();
+      void pollCancellation(id);
+    }catch(error){
+      cancellationFailed(id,'取消失败：'+error.message+'。请刷新查看任务当前状态，仍待处理时可重试。');
+      void refreshDatasets().catch(()=>{});
+    }
   }
   function renderPlanStatus(plan) {
     $('#importLayoutMeta').textContent=`${plan.name||current.id} · ${label(plan.state)} · 规则版本 ${plan.revision??'—'}`;
@@ -160,6 +210,7 @@
     },delay);
   }
   async function open(id, {reload=false}={}) {
+    if(activeTasks.has(String(id))||cancellations.has(String(id)))return;
     persistDraft();clearTimeout(pollTimer);const token=++generation;
     current={id:String(id),plan:null,groups:[],byId:new Map(),page:1,dirty:false,conflict:false,busy:true};
     $('#layoutFilter').value='';$('#layoutSelectionFilter').value='all';
@@ -174,7 +225,7 @@
     if(!$('#importLayoutForm').reportValidity())return;
     if(action==='confirm'&&encodingNeedsScan())return setMessage('编码已更改，请重新扫描以更新文本样例与文件识别后再确认。','error');
     if(action==='confirm'&&!current.groups.some(group=>group.included))return setMessage('请至少勾选一个目录。','error');
-    persistDraft();const id=current.id,token=generation,body=payload();current.busy=true;current.action=action;updateButtons();
+    persistDraft();const id=current.id,token=generation,body=payload();current.busy=true;current.action=action;activeTasks.add(id);updateButtons();renderQueue();
     setMessage(action==='confirm'?'正在保存规则并提交索引任务…':'正在保存草稿…');
     try{
       const result=await api('/api/imports/'+(action==='confirm'?'confirm':'draft'),body);
@@ -188,7 +239,7 @@
       if(error.status===409){current.conflict=true;setMessage('该任务已被更新或提交。你的改动仍保留在本浏览器；请重新加载服务器版本后再继续，避免覆盖他人的选择。','error');}
       else setMessage((action==='confirm'?'提交失败：':'保存失败：')+error.message+'。草稿仍保留，可修改后重试。','error');
       statusNote();updateButtons();
-    }
+    }finally{activeTasks.delete(id);if(current?.id===id){current.busy=false;updateButtons();}renderQueue();}
   }
 
   $('#layoutGroups').addEventListener('input',event=>{
@@ -211,7 +262,7 @@
     if(!current||current.busy||current.conflict||!editableStates.has(current.plan?.state))return;
     if(!$('#importLayoutForm').reportValidity())return;
     if(!confirm('重新扫描将使用当前编码、时区与耗时单位，并重置目录勾选、文件规则和字段修改。原 ZIP 保留；继续吗？'))return;
-    const id=current.id,token=generation;current.busy=true;updateButtons();
+    const id=current.id,token=generation,operation=current;current.busy=true;activeTasks.add(id);updateButtons();renderQueue();
     try{
       if(current.plan.revision){
         const saved=await api('/api/imports/draft',{dataset:id,revision:current.plan.revision,...config()});
@@ -220,17 +271,16 @@
         persistDraft();
       }
       await api('/api/imports/rescan',{dataset:id});if(token!==generation)return;
-      discardLocal(id);current.dirty=false;void open(id,{reload:true});void refreshDatasets().catch(()=>{});
+      discardLocal(id);current.dirty=false;activeTasks.delete(id);void open(id,{reload:true});void refreshDatasets().catch(()=>{});
     }catch(error){if(token!==generation)return;current.busy=false;if(error.status===409)current.conflict=true;setMessage('重新扫描失败：'+error.message+(error.status===409?'。请重新加载服务器版本后再继续。':''),'error');statusNote();updateButtons();}
+    finally{activeTasks.delete(id);if(current===operation){current.busy=false;updateButtons();}renderQueue();}
   });
-  $('#layoutDiscard').addEventListener('click',async()=>{
-    if(!current||current.busy||!editableStates.has(current.plan?.state))return;
-    if(!confirm(`确定丢弃“${current.plan.name}”？将删除该任务的原 ZIP、草稿和残留索引，此操作不能撤销。`))return;
-    const id=current.id,token=generation;current.busy=true;updateButtons();
-    try{await api('/api/datasets/delete',{dataset:id,compact:false});if(token!==generation)return;discardLocal(id);current.dirty=false;dialog.close();void refreshDatasets().catch(()=>{});toast('已提交删除此任务及原 ZIP');}
-    catch(error){if(token!==generation)return;current.busy=false;setMessage('丢弃失败：'+error.message,'error');updateButtons();}
+  $('#layoutDiscard').addEventListener('click',()=>{if(current)void cancelImport(current.id);});
+  $('#importReviewTasks').addEventListener('click',event=>{
+    const cancel=event.target.closest('[data-import-cancel]'),task=event.target.closest('[data-import-open]'),page=event.target.closest('[data-import-queue-page]');
+    if(cancel){if(!cancel.disabled)void cancelImport(cancel.dataset.importCancel);return;}
+    if(task){if(!task.disabled)void open(task.dataset.importOpen);}else if(page){queuePage=Number(page.dataset.importQueuePage);renderQueue();}
   });
-  $('#importReviewTasks').addEventListener('click',event=>{const task=event.target.closest('[data-import-open]'),page=event.target.closest('[data-import-queue-page]');if(task)void open(task.dataset.importOpen);else if(page){queuePage=Number(page.dataset.importQueuePage);renderQueue();}});
   dialog.addEventListener('close',()=>{persistDraft();clearTimeout(pollTimer);generation++;});
   window.addEventListener('beforeunload',persistDraft);
   document.addEventListener('logscope:datasets',renderQueue);

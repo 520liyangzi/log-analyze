@@ -51,13 +51,108 @@ async function search(page, id, marker) {
   return json(page, `/api/search?dataset=${id}&q=${encodeURIComponent(marker)}`);
 }
 
+async function cancelPendingImportRegression(page, retainedId, dialogs) {
+  // A second real ZIP remains at review while the first package stays searchable.
+  const pendingFixture = path.resolve('test-results/import-cancel-fixture.zip');
+  fs.copyFileSync(fixture, pendingFixture);
+  await page.locator('#topUpload').click();
+  await page.locator('#uploadFile').setInputFiles(pendingFixture);
+  const [uploaded] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === '/api/upload' && response.request().method() === 'POST'),
+    page.locator('#uploadSubmit').click(),
+  ]);
+  assert.equal(uploaded.status(), 202);
+  await page.locator('#importLayoutDialog[open]').waitFor();
+  const id = await page.locator('#layoutTaskPicker').inputValue();
+  assert.notEqual(id, retainedId);
+  await waitForReview(page, id);
+  await page.locator('#layoutConfirm:not([disabled])').waitFor();
+  await page.locator('.layout-group [data-layout-field="node"]').first().fill('unsaved-cancel-draft');
+  const draftKey = 'logscope.import-draft.v1.' + id;
+  await page.waitForFunction(key => localStorage.getItem(key)?.includes('unsaved-cancel-draft'), draftKey);
+  await page.locator('#importLayoutDialog .close').click();
+  await page.locator('#importLayoutDialog').waitFor({state:'hidden'});
+
+  const row = page.locator(`[data-import-task="${id}"]`);
+  const cancel = page.locator(`[data-import-cancel="${id}"]`);
+  await cancel.waitFor({state:'visible'});
+  assert.match(await cancel.innerText(), /取消导入/);
+  assert.match(await row.innerText(), /等待确认/);
+  assert.equal(await cancel.isEnabled(), true);
+  await page.locator('#importReviewQueue').screenshot({path:'test-results/import-cancel-pending.png'});
+  await page.setViewportSize({width:390,height:844});
+  await page.locator('#importReviewQueue').screenshot({path:'test-results/import-cancel-mobile.png'});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false,
+    'pending task actions must remain usable without horizontal page overflow');
+  await page.setViewportSize({width:1440,height:1120});
+
+  let requests = 0;
+  const deleteRoute = async route => {
+    const body = route.request().postDataJSON();
+    if (body.dataset !== id) return route.continue();
+    requests++;
+    assert.equal(body.compact, false, 'cancelling an unindexed ZIP must not compact the shared database');
+    assert.equal(body.import_only, true, 'stale review pages must not delete an already completed import');
+    if (requests === 1) return route.fulfill({status:503,contentType:'application/json',
+      body:JSON.stringify({error:'取消服务暂不可用，请重试'})});
+    return route.continue();
+  };
+  await page.route('**/api/datasets/delete', deleteRoute);
+  try {
+    dialogs.accept = false;
+    await cancel.click();
+    assert.match(dialogs.lastMessage, /ZIP/);
+    assert.equal(requests, 0, 'dismissing confirmation must not send a deletion request');
+    await assertNotIndexed(page, id);
+    assert(await page.evaluate(key => localStorage.getItem(key), draftKey), 'declining cancellation must preserve the local draft');
+
+    dialogs.accept = true;
+    await cancel.click();
+    await row.locator('.import-cancel-error').filter({hasText:'取消服务暂不可用'}).waitFor();
+    assert.equal(await cancel.isEnabled(), true, 'failed cancellation must expose a usable retry');
+    assert.equal(await row.locator('[data-import-open]').isEnabled(), true);
+    await assertNotIndexed(page, id);
+    assert(await page.evaluate(key => localStorage.getItem(key), draftKey), 'failed cancellation must preserve the local draft');
+
+    const [deleted] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === '/api/datasets/delete' && response.status() === 202),
+      cancel.click(),
+    ]);
+    assert.equal(deleted.status(), 202);
+    await row.waitFor({state:'detached',timeout:15000});
+    assert.equal(requests, 2, 'retry should send one new deletion request');
+    assert.equal(await page.evaluate(key => localStorage.getItem(key), draftKey), null,
+      'completed cancellation must remove this browser\'s unsaved draft');
+    assert.equal((await json(page, '/api/datasets')).some(item => item.id === id), false);
+    for (const endpoint of ['/api/imports/preview', '/api/archives/download']) {
+      const response = await page.request.get(`${origin}${endpoint}?dataset=${id}`);
+      assert([400, 404].includes(response.status()), `${endpoint} must not expose the cancelled task or ZIP`);
+    }
+    await page.reload();
+    await page.locator('#dataset option').filter({hasText:'import-fixture.zip'}).waitFor({state:'attached'});
+    assert.equal(await page.locator(`[data-import-task="${id}"]`).count(), 0,
+      'cancelled pending task must stay removed after reload');
+    assert.equal(await page.evaluate(key => localStorage.getItem(key), draftKey), null,
+      'closing or unloading the old review must not resurrect its cancelled draft');
+    assert.equal((await search(page, retainedId, 'browser-import-special-abc')).summary.total, 1,
+      'cancelling the pending ZIP must leave other indexed logs searchable');
+  } finally {
+    dialogs.accept = true;
+    await page.unroute('**/api/datasets/delete', deleteRoute);
+  }
+}
+
 (async () => {
   fs.mkdirSync('test-results', {recursive:true});
   const browser = await chromium.launch({headless:true});
   const page = await browser.newPage({viewport:{width:1440,height:1120}});
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  page.on('dialog', dialog => dialog.accept());
+  const dialogs = {accept:true,lastMessage:''};
+  page.on('dialog', dialog => {
+    dialogs.lastMessage = dialog.message();
+    return dialogs.accept ? dialog.accept() : dialog.dismiss();
+  });
   try {
     await ready(page);
     assert(fs.existsSync(fixture), 'fixture server must generate the ZIP before accepting requests');
@@ -179,8 +274,9 @@ async function search(page, id, marker) {
     await page.locator('#searchResults .log-list').filter({hasText:'browser-import-special-abc'}).waitFor();
     assert((await page.locator('#searchResults').innerText()).includes('edited-pod'));
     await page.screenshot({path:'test-results/import-search-desktop.png',fullPage:true});
+    await cancelPendingImportRegression(page, upload.id, dialogs);
     assert.deepEqual(errors, []);
-    console.log('Import browser regression passed: real upload, scan-only review, directory selection, editable patterns/mappings, line mode, persistent draft, confirm, custom/legacy search, exclusions and responsive preview.');
+    console.log('Import browser regression passed: real upload, scan-only review, editable mappings, persistent draft, indexed search, responsive preview, direct pending-task cancellation, declined confirmation, failed cancellation retry, draft cleanup and reload persistence.');
   } catch (error) {
     await page.screenshot({path:'test-results/import-failure.png',fullPage:true});
     throw error;
