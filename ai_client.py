@@ -156,7 +156,7 @@ class ModelConfig:
             config = self.load(False)
             configured = all(config[key].strip() for key in ('base_url', 'api_key', 'model'))
             return dict(configured=configured, default_project_path=config['default_project_path'],
-                        message='共享模型已配置' if configured else '请维护者填写本机 data/ai-config.json；页面不提供密钥查看或编辑。')
+                        message='共享模型已配置（仅本地校验，连接在发送时验证）' if configured else '请维护者填写本机 data/ai-config.json；页面不提供密钥查看或编辑。')
         except ValueError as exc:
             return dict(configured=False, default_project_path=DEFAULT_CONFIG['default_project_path'], message=str(exc))
 
@@ -236,16 +236,88 @@ class ModelClient:
         with self.lock:
             self.connection = connection
         text, calls, finish = '', {}, None
+        anthropic_inputs = {}
+        response_phase = 'response_shape'
         started = time.monotonic()
         connection.response_class = lambda sock, *args, **kwargs: http.client.HTTPResponse(
             _ResponseSocket(sock, self.stop, started + timeout), *args, **kwargs)
         response = None
 
+        def incompatible(code, message):
+            raise ValueError(f'模型返回格式不兼容 [{code}]：{message}；地址、密钥和原始响应不会回显。') from None
+
+        def optional(value, expected, empty, code):
+            if value is None:
+                return empty
+            if not isinstance(value, expected):
+                incompatible(code, '响应字段类型不符合当前接口协议')
+            return value
+
+        def parse_payload(raw, code):
+            try:
+                data = json.loads(raw)
+            except UnicodeError:
+                incompatible(code, '响应 JSON 编码无效，请检查模型网关返回的编码')
+            except (ValueError, TypeError):
+                incompatible(code, '响应不是完整有效的 JSON，请检查模型网关返回格式')
+            if not isinstance(data, dict):
+                incompatible(response_phase, '响应 JSON 顶层必须是对象')
+            if ('error' in data and data['error'] is not None) or data.get('type') == 'error':
+                incompatible('upstream_error', '模型服务返回错误，请维护者检查服务端日志、请求参数与额度')
+            kind = data.get('type')
+            if (data.get('object') == 'response' or (isinstance(kind, str) and kind.startswith('response.'))
+                    or ('output' in data and 'choices' not in data and 'content' not in data)):
+                incompatible('response_protocol', '当前不支持 Responses API，请使用 Chat Completions 或 Anthropic Messages 接口')
+            anthropic_kinds = ('message', 'message_start', 'message_delta', 'message_stop',
+                               'content_block_start', 'content_block_delta', 'content_block_stop', 'ping')
+            if (anthropic and 'choices' in data) or (not anthropic and (kind in anthropic_kinds or 'stop_reason' in data)):
+                incompatible('response_protocol', '返回协议与 provider 不一致，请检查 provider 和模型接口路径')
+            return data
+
         def add_text(delta):
             nonlocal text
+            if delta is None:
+                return
+            if isinstance(delta, list):
+                if any(not isinstance(block, dict) or block.get('type') != 'text'
+                       or not isinstance(block.get('text'), str) for block in delta):
+                    incompatible(response_phase, 'content 数组仅支持明确的 text 文本块')
+                delta = ''.join(block['text'] for block in delta)
+            if not isinstance(delta, str):
+                incompatible(response_phase, 'content 必须是文本、空值或受支持的文本块数组')
             text += delta
             # Redact the accumulated text, not individual chunks (keys can span chunks).
             on_text(self.clean(text))
+
+        def stream_events():
+            size, first_line, data_lines = 0, True, []
+            while True:
+                line = response.readline(response_limit - size + 1)
+                if self.stop.is_set():
+                    raise Cancelled()
+                if not line:
+                    if data_lines:
+                        yield b'\n'.join(data_lines)
+                    return
+                size += len(line)
+                if size > response_limit or time.monotonic() - started > timeout:
+                    raise ValueError('模型响应超过时间或大小限制，请重试或缩小问题范围')
+                if first_line:
+                    line = line.removeprefix(b'\xef\xbb\xbf')
+                    first_line = False
+                line = line.rstrip(b'\r\n')
+                if not line:
+                    if data_lines:
+                        yield b'\n'.join(data_lines)
+                        data_lines = []
+                    continue
+                if line.startswith(b':'):
+                    continue
+                field, _, value = line.partition(b':')
+                if field == b'data':
+                    # SSE removes at most one separator space, then joins all
+                    # data fields in the event with newlines before JSON parsing.
+                    data_lines.append(value[1:] if value.startswith(b' ') else value)
 
         try:
             if self.stop.is_set():
@@ -269,11 +341,18 @@ class ModelClient:
                 else:
                     reason = '请检查模型配置、接口协议和工具调用支持'
                 raise ValueError(f'模型接口返回 HTTP {response.status}：{reason}；服务端原始错误不回显。')
-            if 'text/event-stream' not in response.getheader('Content-Type', ''):
+            content_type = response.getheader('Content-Type', '').split(';', 1)[0].strip().lower()
+            # A bounded peek preserves incremental reads when a gateway labels
+            # an SSE stream application/json. It never consumes or logs the body.
+            prefix = response.peek(256)[:256].removeprefix(b'\xef\xbb\xbf').lstrip()
+            if prefix.startswith(b'<'):
+                incompatible('response_html', '接口返回了 HTML 或标记页面，请检查模型地址、登录页面或网关入口')
+            is_stream = content_type == 'text/event-stream' or prefix.startswith((b'data:', b'event:', b':'))
+            if not is_stream:
                 raw = response.read(response_limit + 1)
                 if len(raw) > response_limit:
                     raise ValueError('模型单次响应超过大小限制')
-                data = json.loads(raw)
+                data = parse_payload(raw, 'response_json')
                 if anthropic:
                     for block in data.get('content', []):
                         if block['type'] == 'text':
@@ -283,36 +362,26 @@ class ModelClient:
                     finish = data.get('stop_reason')
                 else:
                     choice = data['choices'][0]
-                    add_text(choice['message'].get('content') or '')
-                    calls = dict(enumerate(choice['message'].get('tool_calls') or []))
+                    message = choice['message']
+                    if message.get('function_call') is not None:
+                        incompatible('tool_shape', '不支持旧式 function_call，请使用 function 类型的 tool_calls')
+                    add_text(message.get('content'))
+                    calls = dict(enumerate(optional(message.get('tool_calls'), list, [], 'tool_shape')))
                     finish = choice.get('finish_reason')
             else:
-                size = 0
-                while True:
-                    # Bound each line as well as the accumulated wire bytes.
-                    line = response.readline(response_limit - size + 1)
-                    if not line:
+                response_phase = 'stream_shape'
+                for payload in stream_events():
+                    if payload.strip() == b'[DONE]':
                         break
-                    if self.stop.is_set():
-                        raise Cancelled()
-                    size += len(line)
-                    if size > response_limit or time.monotonic() - started > timeout:
-                        raise ValueError('模型响应超过时间或大小限制，请重试或缩小问题范围')
-                    if not line.startswith(b'data:'):
+                    if not payload.strip():
                         continue
-                    payload = line[5:].strip()
-                    if payload == b'[DONE]':
-                        break
-                    if not payload:
-                        continue
-                    data = json.loads(payload)
-                    if data.get('error') or data.get('type') == 'error':
-                        raise ValueError('模型流式响应报告错误，请稍后重试；原始错误不回显。')
+                    data = parse_payload(payload, 'stream_json')
                     if anthropic:
                         kind = data.get('type')
                         if kind == 'content_block_start' and data['content_block']['type'] == 'tool_use':
                             block = data['content_block']
                             calls[data['index']] = dict(id=block['id'], type='function', function=dict(name=block['name'], arguments=''))
+                            anthropic_inputs[data['index']] = block.get('input')
                         elif kind == 'content_block_delta':
                             delta = data['delta']
                             if delta['type'] == 'text_delta':
@@ -322,31 +391,59 @@ class ModelClient:
                         elif kind == 'message_delta':
                             finish = data['delta'].get('stop_reason') or finish
                     else:
-                        for choice in data.get('choices', []):
+                        for choice in optional(data.get('choices'), list, [], 'stream_shape'):
                             if choice.get('index', 0) != 0:
                                 continue
-                            delta = choice.get('delta', {})
-                            if delta.get('content'):
+                            delta = optional(choice.get('delta'), dict, {}, 'stream_shape')
+                            if delta.get('function_call') is not None:
+                                incompatible('tool_shape', '不支持旧式 function_call，请使用 function 类型的 tool_calls')
+                            if delta.get('content') is not None:
                                 add_text(delta['content'])
-                            for fragment in delta.get('tool_calls', []):
+                            for fragment in optional(delta.get('tool_calls'), list, [], 'stream_shape'):
+                                if (not isinstance(fragment, dict) or type(fragment.get('index')) is not int
+                                        or fragment['index'] < 0 or fragment.get('type') not in (None, 'function')):
+                                    incompatible('tool_shape', '工具调用片段必须包含有效索引，并使用 function 类型')
                                 call = calls.setdefault(fragment['index'], dict(id='', type='function', function=dict(name='', arguments='')))
-                                call['id'] += fragment.get('id') or ''
+                                identifier = optional(fragment.get('id'), str, '', 'tool_shape')
+                                call['id'] += identifier
+                                function = optional(fragment.get('function'), dict, {}, 'tool_shape')
                                 for key in ('name', 'arguments'):
-                                    call['function'][key] += fragment.get('function', {}).get(key) or ''
+                                    call['function'][key] += optional(function.get(key), str, '', 'tool_shape')
                             finish = choice.get('finish_reason') or finish
             if self.stop.is_set():
                 raise Cancelled()
             if finish is None:
                 raise ValueError('模型连接提前中断，已保留收到的内容，请重试')
+            if not isinstance(finish, str):
+                incompatible(response_phase, '完成原因必须是文本')
+            if finish == 'function_call' or (finish in ('tool_calls', 'tool_use') and not calls):
+                incompatible('tool_shape', '模型声明了工具调用，但未返回受支持的完整工具调用')
+            if calls and finish in ('length', 'max_tokens'):
+                incompatible('tool_arguments', '模型输出达到长度上限，工具调用可能不完整，未执行工具；请调整输出额度后重试')
             if len(calls) > 8:
                 raise ValueError('模型一次请求了过多工具，最多允许 8 个')
             result = dict(role='assistant', content=self.clean(text))
             if calls:
                 result['tool_calls'] = [calls[k] for k in sorted(calls)]
+                identifiers = set()
+                for index, initial in anthropic_inputs.items():
+                    if calls[index]['function']['arguments'] == '' and isinstance(initial, dict):
+                        calls[index]['function']['arguments'] = json.dumps(initial)
                 for call in result['tool_calls']:
-                    if not call.get('id') or not isinstance(call.get('function', {}).get('arguments'), str):
-                        raise ValueError('模型返回的工具调用格式不正确')
-                    json.loads(call['function']['arguments'] or '{}')
+                    if not isinstance(call, dict) or not isinstance(call.get('function'), dict):
+                        incompatible('tool_shape', '工具调用缺少 function 对象')
+                    function = call['function']
+                    if (not isinstance(call.get('id'), str) or not call['id'].strip() or call['id'] in identifiers
+                            or call.get('type') != 'function' or not isinstance(function.get('name'), str)
+                            or not function['name'].strip() or not isinstance(function.get('arguments'), str)):
+                        incompatible('tool_shape', '工具调用缺少有效的唯一 ID、函数名称或字符串参数')
+                    identifiers.add(call['id'])
+                    try:
+                        arguments = json.loads(function['arguments'])
+                    except (ValueError, TypeError):
+                        incompatible('tool_arguments', '工具参数不是完整有效的 JSON 对象，未执行工具')
+                    if not isinstance(arguments, dict):
+                        incompatible('tool_arguments', '工具参数必须是 JSON 对象，未执行工具')
             return result, finish in ('length', 'max_tokens')
         except (OSError, http.client.HTTPException, KeyError, TypeError, IndexError,
                 AttributeError, UnicodeError, json.JSONDecodeError) as exc:
@@ -373,7 +470,7 @@ class ModelClient:
             elif isinstance(exc, UnicodeError):
                 reason = '模型请求或响应编码无效，请检查 URL、密钥字符与接口响应编码'
             else:
-                reason = '模型返回格式不兼容，请检查 provider、模型接口协议和工具调用支持'
+                incompatible(response_phase, '响应结构缺少必要字段或字段类型错误，请检查 provider 和接口协议')
             raise ValueError(f'{reason}；地址、密钥和原始响应不会回显。') from None
         finally:
             if response is not None:

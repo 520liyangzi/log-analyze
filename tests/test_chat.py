@@ -90,12 +90,12 @@ class FakeModel:
                         message = choice['message']
                         for part in [message['content'][:3], message['content'][3:]]:
                             if part:
-                                emit(dict(choices=[dict(index=0, delta=dict(content=part), finish_reason=None)]))
+                                emit(dict(choices=[dict(index=0, delta=dict(content=part, tool_calls=None), finish_reason=None)]))
                         for i, call in enumerate(message.get('tool_calls', [])):
                             fn = call['function']
                             emit(dict(choices=[dict(index=0, delta=dict(tool_calls=[dict(index=i, id=call['id'], type='function', function=dict(name=fn['name'], arguments=fn['arguments'][:4]))]), finish_reason=None)]))
                             emit(dict(choices=[dict(index=0, delta=dict(tool_calls=[dict(index=i, function=dict(arguments=fn['arguments'][4:]))]), finish_reason=None)]))
-                        emit(dict(choices=[dict(index=0, delta={}, finish_reason=choice['finish_reason'])]))
+                        emit(dict(choices=[dict(index=0, delta=None, finish_reason=choice['finish_reason'])]))
                     self.wfile.write(b'data: [DONE]\n\n')
                 except (OSError, ConnectionError):
                     pass
@@ -272,6 +272,24 @@ class NativeChatTests(unittest.TestCase):
         session = self.send(self.preview())
         self.assertEqual(self.wait(session['id'])['session']['state'], 'failed')
         self.assertEqual(self.chat.report(session['id'])['text'], '')
+
+    def test_invalid_tool_arguments_preserve_partial_reply_without_running_tools(self):
+        reply = response('已收到线索，正在组织查询。', [('search_logs', {})])
+        reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = '{private-invalid-marker'
+        self.model.replies = [reply]
+        session = self.send(self.preview())
+        result = self.wait(session['id'])
+        self.assertEqual(result['session']['state'], 'failed')
+        self.assertIn('[tool_arguments]', result['session']['status'])
+        self.assertFalse(any(e['kind'] == 'tool' for e in result['events']))
+        partials = [e['body'] for e in result['events'] if e['kind'] == 'assistant']
+        self.assertTrue(any('已收到线索' in b.get('text', '') and b.get('interrupted') for b in partials))
+        self.assertFalse(any(b.get('streaming') for b in partials))
+        self.assertNotIn('private-invalid-marker', json.dumps(result))
+        self.assertEqual(self.chat.report(session['id'])['text'], '')
+        self.model.replies = [response('重试成功')]
+        self.send(self.preview(id=session['id']), 'retry-format')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
 
     def test_tool_validation_pinned_dataset_and_repeat_guard(self):
         session = dict(task=dict(dataset=self.dataset, project=None))
