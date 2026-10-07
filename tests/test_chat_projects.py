@@ -105,12 +105,15 @@ class ManagedChatProjectsTests(unittest.TestCase):
 
     def expected_root(self, url, name='widget'):
         digest = hashlib.sha256(url.encode('utf-8')).hexdigest()[:12]
-        return self.data / 'projects' / (name + '-' + digest)
+        # Windows tempfile may return RUNNER~1 while the managed path resolves
+        # to runneradmin. Compare canonical locations, retaining the alias as
+        # the input so this still exercises normalization by ChatProjects.
+        return (self.data / 'projects' / (name + '-' + digest)).resolve()
 
     def test_clone_is_managed_and_repository_catalog_survives_restart(self):
         fixture = self.remote()
         initial_catalog = self.projects.repositories()
-        self.assertEqual(Path(initial_catalog['storage_path']), self.data / 'projects')
+        self.assertEqual(Path(initial_catalog['storage_path']), (self.data / 'projects').resolve())
         self.assertEqual(initial_catalog['repositories'], [])
 
         job = self.sync(fixture['url'])
