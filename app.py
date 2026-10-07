@@ -29,7 +29,6 @@ from log_collector import LogCollector
 from index_retention import IndexMaintenance, dataset_lifecycle, expire_indexes
 from retention import RetentionManager
 from runtime_paths import APP_ROOT, FROZEN, RESOURCE_ROOT
-from terminal_bridge import TerminalManager, dimensions
 
 STAMP = re.compile(r'^\[?((?:\d{4}-\d\d-\d\d|\d{8})[ T]\d\d:\d\d:\d\d(?:[.,]\d{1,6})?)(?:\s*([+-]\d{4}))?')
 ROOT = re.compile(r'^\[[^\]]+\]\s*\[([^\]]*)\]\s*\[([^\]]*)\]\s*\[(TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\]\s*\[([^\]]*)\]')
@@ -767,7 +766,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/2.3'
+    server_version = 'LogScope/2.4'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -793,9 +792,6 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get('Sec-Fetch-Site') == 'cross-site':
             self.json({'error': '不允许跨站请求'}, 403)
             return False
-        if urlsplit(self.path).path.startswith('/api/terminal/') and self.client_address[0] not in ('127.0.0.1', '::1'):
-            self.json({'error': '旧版 CMD 终端仅在服务电脑使用；共享访问请使用原生 AI 对话。'}, 403)
-            return False
         return True
     def do_GET(self):
         if not self.allowed():
@@ -804,7 +800,7 @@ class Handler(BaseHTTPRequestHandler):
         params = {k: v[0] for k, v in parse_qs(parsed.query, keep_blank_values=True).items()}
         try:
             if parsed.path == '/api/chat/capability':
-                self.json(dict(self.server.chats.config.public(), local_terminal=self.client_address[0] in ('127.0.0.1', '::1')))
+                self.json(self.server.chats.config.public())
             elif parsed.path == '/api/chat/sessions':
                 self.json(self.server.chats.list())
             elif parsed.path == '/api/chat/session':
@@ -852,22 +848,8 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == '/api/correlate':
                 self.json(self.store.correlate(int(params['id']), params.get('seconds', 5), params.get('same_thread') == '1',
                                                params.get('page', 1), params.get('kind', ''), params.get('size', 50)))
-            elif parsed.path == '/api/terminal/config':
-                self.json(self.server.terminals.config())
             elif parsed.path == '/api/analysis/rules':
-                self.json(self.server.terminals.rules.get(params.get('version')))
-            elif parsed.path == '/api/terminal/task':
-                self.json(self.server.terminals.task_details(params['id']))
-            elif parsed.path == '/api/terminal/sessions':
-                self.json(self.server.terminals.list())
-            elif parsed.path == '/api/terminal/output':
-                self.json(self.server.terminals.get(params['id']).poll(params.get('cursor', 0)))
-            elif parsed.path == '/api/terminal/history':
-                self.json(self.server.terminals.history(params['id']))
-            elif parsed.path == '/api/terminal/report':
-                self.json(self.server.terminals.report(params['id']))
-            elif parsed.path == '/api/project/branches':
-                self.json(self.server.terminals.project_branches(params.get('path', '')))
+                self.json(self.server.chats.rules.get(params.get('version')))
             elif parsed.path == '/api/export':
                 iterator = self.store.export(params)
                 first = next(iterator, b'')
@@ -885,12 +867,10 @@ class Handler(BaseHTTPRequestHandler):
                     iterator.close()
             else:
                 routes = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css',
-                          '/enhancements.css': 'enhancements.css', '/terminal.js': 'terminal.js',
+                          '/enhancements.css': 'enhancements.css', '/analysis-rules.js': 'analysis-rules.js',
                           '/chat.js': 'chat.js', '/chat.css': 'chat.css',
                           '/retention.js': 'retention.js', '/retention.css': 'retention.css',
-                          '/import-layout.js': 'import-layout.js', '/import-layout.css': 'import-layout.css',
-                          '/vendor/xterm.js': 'vendor/xterm.js', '/vendor/xterm.css': 'vendor/xterm.css',
-                          '/vendor/addon-fit.js': 'vendor/addon-fit.js'}
+                          '/import-layout.js': 'import-layout.js', '/import-layout.css': 'import-layout.css'}
                 if parsed.path not in routes:
                     return self.json({'error': '不存在'}, 404)
                 file = RESOURCE_ROOT / 'dist' / routes[parsed.path]
@@ -964,8 +944,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.json(self.server.chats.delete(str(body.get('id', ''))))
                 elif parsed.path == '/api/chat/project-sync':
                     self.json(self.server.chats.projects.sync(body), 202)
-                elif parsed.path == '/api/terminal/config':
-                    self.json(self.server.terminals.save_config(body))
                 elif parsed.path == '/api/collector/start':
                     if body.get('environment_id'):
                         body.update(self.server.collector_environments.resolve(body['environment_id']))
@@ -975,46 +953,14 @@ class Handler(BaseHTTPRequestHandler):
                 elif parsed.path == '/api/collector/environments/delete':
                     self.json(self.server.collector_environments.delete(body.get('id', '')))
                 elif parsed.path == '/api/analysis/rules':
-                    self.json(self.server.terminals.rules.save(body))
-                elif parsed.path == '/api/terminal/preview':
-                    self.json(self.server.terminals.preview(body))
-                elif parsed.path == '/api/terminal/code-preview':
-                    self.json(self.server.terminals.preview_code(body))
-                elif parsed.path == '/api/terminal/code-task':
-                    self.json(self.server.terminals.create_code_task(body))
-                elif parsed.path == '/api/terminal/rules':
-                    self.json(self.server.terminals.update_rules(body))
-                elif parsed.path == '/api/terminal/start':
-                    self.json(self.server.terminals.start(body), 201)
-                elif parsed.path == '/api/terminal/resume':
-                    self.json(self.server.terminals.resume(body), 201)
-                elif parsed.path == '/api/terminal/session-id':
-                    self.json(self.server.terminals.save_ai_session_id(body))
+                    self.json(self.server.chats.rules.save(body))
                 elif parsed.path == '/api/datasets/delete':
                     identifier = str(body.get('dataset', ''))
                     with self.store.lifecycle_lock:
-                        if self.server.terminals.dataset_in_use(identifier):
-                            raise ValueError('该日志包正在被 AI 终端使用，请先结束对应终端')
                         if self.server.chats.dataset_in_use(identifier):
                             raise ValueError('该日志包正在被原生 AI 排查使用，请先停止对应会话')
                         self.store.request_delete(identifier, body.get('compact') is True)
                     self.json({'ok': True, 'id': identifier}, 202)
-                elif parsed.path == '/api/terminal/input':
-                    self.server.terminals.get(body['id']).write(body.get('data', ''))
-                    self.json({'ok': True})
-                elif parsed.path == '/api/terminal/resize':
-                    cols, rows = dimensions(body.get('cols', 100), body.get('rows', 30))
-                    self.server.terminals.get(body['id']).pty.resize(cols, rows)
-                    self.json({'ok': True})
-                elif parsed.path == '/api/terminal/stop':
-                    session = self.server.terminals.get(body['id'])
-                    if body.get('mode') == 'graceful':
-                        self.json(session.request_stop())
-                    else:
-                        session.stop()
-                        self.json(session.info())
-                elif parsed.path == '/api/terminal/delete':
-                    self.json(self.server.terminals.delete(body))
                 else:
                     self.json({'error':'不存在'}, 404)
         except ImportConflict as exc:
@@ -1030,9 +976,6 @@ class Handler(BaseHTTPRequestHandler):
 
 class LocalServer(ThreadingHTTPServer):
     def retention_busy(self):
-        with self.terminals.lock:
-            if any(s.state == 'running' for s in self.terminals.sessions.values()):
-                return True
         with self.chats.lock:
             if self.chats.active:
                 return True
@@ -1046,8 +989,6 @@ class LocalServer(ThreadingHTTPServer):
             self.chats.close()
         if hasattr(self, 'collector'):
             self.collector.close()
-        if hasattr(self, 'terminals'):
-            self.terminals.close()
         super().server_close()
 
 
@@ -1064,7 +1005,6 @@ def make_server(directory, port=8765, collect_script=None, host='127.0.0.1', all
             pass
         names.update(allowed_hosts or [])
         server.allowed_hosts.update(f'{name}:{port}' for name in names if name != '0.0.0.0')
-    server.terminals = TerminalManager(server.store, f'http://127.0.0.1:{port}')
     server.collector_environments = CollectorEnvironments(server.store.directory)
     server.collector = LogCollector(server.store, collect_script or APP_ROOT / 'collect_logs.py')
     server.chats = ChatManager(server.store)

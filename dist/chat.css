@@ -1,4 +1,3 @@
-.legacy-nav { font-size:.76rem; color:#8292ae; padding-block:9px; }
 .chat-topline { display:flex; align-items:center; flex-wrap:wrap; gap:10px; color:#71829a; font-size:.8rem; margin:-5px 0 18px; }
 .chat-status-dot { width:7px; height:7px; border-radius:50%; background:#d7a24e; }
 .chat-status-dot.ready { background:#31ae83; box-shadow:0 0 0 4px #def5eb; }

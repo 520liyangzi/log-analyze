@@ -8,7 +8,9 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from app import Store, make_server
+from ai_client import DEFAULT_CONFIG
 from demo import create_demo
+from test_chat import FakeModel
 
 
 class DeleteDatasetTests(unittest.TestCase):
@@ -34,34 +36,53 @@ class DeleteDatasetTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             base = 'http://127.0.0.1:' + str(server.server_address[1])
-            first = server.store.submit(create_demo(Path(temp) / 'first.zip'), 'first.zip')
-            second = server.store.submit(create_demo(Path(temp) / 'second.zip'), 'second.zip')
-            self.wait_ready(server, [first, second])
-            archive = server.store.directory / 'archives' / (first + '.zip')
-            self.assertTrue(archive.exists())
-            session = server.terminals.start({'dataset': first, 'question': '占用测试', 'run_command': False})
+            model = FakeModel()
+            server.chats.config.path.write_text(json.dumps(dict(DEFAULT_CONFIG, base_url=model.url,
+                                                                 api_key='fake-secret-123', model='fake-model')), 'utf-8')
             try:
-                with self.assertRaises(HTTPError) as error:
-                    self.api(base, '/api/datasets/delete', {'dataset': first})
-                self.assertEqual(error.exception.code, 400)
+                first = server.store.submit(create_demo(Path(temp) / 'first.zip'), 'first.zip')
+                second = server.store.submit(create_demo(Path(temp) / 'second.zip'), 'second.zip')
+                self.wait_ready(server, [first, second])
+                archive = server.store.directory / 'archives' / (first + '.zip')
+                self.assertTrue(archive.exists())
+                model.replies = ['wait']
+                _, preview = self.api(base, '/api/chat/preview', {'dataset': first, 'question': '占用测试'})
+                _, session = self.api(base, '/api/chat/send', {'preview_id': preview['preview_id'], 'request_id': 'delete-in-use-test'})
+                try:
+                    with self.assertRaises(HTTPError) as error:
+                        self.api(base, '/api/datasets/delete', {'dataset': first})
+                    with error.exception as failure:
+                        self.assertEqual(failure.code, 400)
+                    self.assertTrue(archive.exists())
+                    self.assertTrue(server.chats.dataset_in_use(first))
+                finally:
+                    self.api(base, '/api/chat/stop', {'id': session['id']})
+                    model.gate.set()
+                    server.chats.pool.shutdown(wait=True)
+                self.assertFalse(server.chats.dataset_in_use(first))
+                status, _ = self.api(base, '/api/datasets/delete', {'dataset': first})
+                self.assertEqual(status, 202)
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline and any(row['id'] == first for row in server.store.datasets()):
+                    time.sleep(.03)
+                self.assertFalse(any(row['id'] == first for row in server.store.datasets()))
+                self.assertTrue(any(row['id'] == second for row in server.store.datasets()))
+                self.assertFalse(archive.exists())
+                with server.store.connect() as db:
+                    self.assertEqual(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (first,)).fetchone()[0], 0)
+                    self.assertEqual(db.execute('SELECT count(*) FROM files WHERE dataset=?', (first,)).fetchone()[0], 0)
+                    self.assertGreater(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (second,)).fetchone()[0], 0)
+                    for table in server.store.fts_tables:
+                        self.assertEqual(db.execute(f'SELECT count(*) FROM {table} WHERE rowid NOT IN (SELECT id FROM logs)').fetchone()[0], 0)
             finally:
-                self.api(base, '/api/terminal/stop', {'id': session['id']})
-            status, _ = self.api(base, '/api/datasets/delete', {'dataset': first})
-            self.assertEqual(status, 202)
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline and any(row['id'] == first for row in server.store.datasets()):
-                time.sleep(.03)
-            self.assertFalse(any(row['id'] == first for row in server.store.datasets()))
-            self.assertTrue(any(row['id'] == second for row in server.store.datasets()))
-            self.assertFalse(archive.exists())
-            with server.store.connect() as db:
-                self.assertEqual(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (first,)).fetchone()[0], 0)
-                self.assertEqual(db.execute('SELECT count(*) FROM files WHERE dataset=?', (first,)).fetchone()[0], 0)
-                self.assertGreater(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (second,)).fetchone()[0], 0)
-                for table in server.store.fts_tables:
-                    self.assertEqual(db.execute(f'SELECT count(*) FROM {table} WHERE rowid NOT IN (SELECT id FROM logs)').fetchone()[0], 0)
-            server.shutdown();server.server_close();thread.join()
-            server.store.pool.shutdown(wait=True)
+                model.gate.set()
+                server.shutdown()
+                server.server_close()
+                thread.join()
+                server.store.pool.shutdown(wait=True)
+                server.chats.pool.shutdown(wait=True)
+                server.chats.projects.pool.shutdown(wait=True)
+                model.close()
 
     def test_restart_finishes_interrupted_deletion(self):
         with tempfile.TemporaryDirectory() as temp:

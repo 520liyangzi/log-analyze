@@ -1,13 +1,11 @@
+"""Standalone read-only CLI coverage, independent of any embedded terminal."""
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unittest
-from urllib.request import Request, urlopen
 
 from app import make_server
 from demo import create_demo, TRACE
@@ -16,7 +14,7 @@ from install_skill import install
 BASE = Path(__file__).resolve().parents[1]
 
 
-class TerminalTests(unittest.TestCase):
+class CLITests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix='logscope test space ')
@@ -34,30 +32,12 @@ class TerminalTests(unittest.TestCase):
         cls.thread.join()
         cls.temp.cleanup()
 
-    def api(self, path, body=None):
-        request = Request(self.url + path, data=json.dumps(body).encode() if body is not None else None,
-                          headers={'Content-Type': 'application/json'})
-        with urlopen(request, timeout=20) as response:
-            return json.load(response)
-
     def cli(self, *args, cwd=None):
         result = subprocess.run([sys.executable, str(BASE / 'skills/logscope/scripts/logscope.py'),
                                  '--url', self.url, '--dataset', self.dataset, *args],
                                 capture_output=True, text=True, encoding='utf-8', cwd=cwd, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
-
-    def wait_output(self, identifier, wanted, timeout=12, cursor=0):
-        text = ''
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            result = self.api('/api/terminal/output?id=' + identifier + '&cursor=' + str(cursor))
-            cursor = result['cursor']
-            text += result['output']
-            if wanted in text:
-                return text, cursor
-            time.sleep(.04)
-        self.fail('Terminal did not produce expected output ' + repr(wanted) + ': ' + repr(text[-2000:]))
 
     def test_raw_archive_verification_and_tamper_detection(self):
         result = self.cli('search', '--q', 'gzip-history-hit')
@@ -112,51 +92,8 @@ class TerminalTests(unittest.TestCase):
             install(target)
         result = subprocess.run([sys.executable, str(target / 'scripts/logscope.py'), '--url', self.url, 'datasets'],
                                 capture_output=True, text=True, encoding='utf-8', timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)[0]['id'], self.dataset)
-
-    def test_real_pty_input_unicode_resize_interrupt_and_report(self):
-        config = self.api('/api/terminal/config')
-        if not config['available']:
-            self.fail('Terminal dependency unavailable in test environment: ' + config['reason'])
-        self.api('/api/terminal/config', {'command': ''})
-        info = self.api('/api/terminal/start', {'dataset': self.dataset, 'question': '接口 /api/x?arg="& test" 报错', 'cols': 100, 'rows': 30})
-        identifier = info['id']
-        # The child must observe a TTY; pipes are not sufficient for interactive Claude.
-        script = Path(info['cwd']) / 'interactive_test.py'
-        script.write_text("import sys, time\nprint('PTY_' + str(sys.stdin.isatty()), flush=True)\nvalue=input('INPUT_REQUIRED>')\nprint('REPLY_' + value, flush=True)\ntry:\n time.sleep(30)\nexcept KeyboardInterrupt:\n print('INTERRUPTED_OK',flush=True)\n", 'utf-8')
-        if os.name == 'nt':
-            command = subprocess.list2cmdline([sys.executable, str(script)])
-        else:
-            import shlex
-            command = shlex.join([sys.executable, str(script)])
-        try:
-            self.api('/api/terminal/input', {'id': identifier, 'data': command + '\r'})
-            first_output, cursor = self.wait_output(identifier, 'INPUT_REQUIRED>')
-            self.assertIn('PTY_True', first_output)
-            self.api('/api/terminal/resize', {'id': identifier, 'cols': 132, 'rows': 40})
-            self.api('/api/terminal/input', {'id': identifier, 'data': '中文确认 yes\r'})
-            reply, cursor = self.wait_output(identifier, 'REPLY_中文确认 yes', cursor=cursor)
-            self.api('/api/terminal/input', {'id': identifier, 'data': '\x03'})
-            self.wait_output(identifier, 'INTERRUPTED_OK', cursor=cursor)
-            task = json.loads((Path(info['cwd']) / 'task.json').read_text('utf-8'))
-            self.assertEqual(task['dataset'], self.dataset)
-            self.assertTrue((Path(info['cwd']) / '.claude/skills/logscope/SKILL.md').exists())
-            (Path(info['cwd']) / 'report.md').write_text('# 模拟报告\n原文已核验。', 'utf-8')
-            report = self.api('/api/terminal/report?id=' + identifier)
-            self.assertTrue(report['available'])
-            self.assertIn('原文已核验', report['text'])
-            self.assertEqual(self.api('/api/terminal/sessions')[-1]['id'], identifier)
-        finally:
-            self.api('/api/terminal/stop', {'id': identifier})
-        self.assertEqual(self.api('/api/terminal/output?id=' + identifier)['state'], 'stopped')
-
-    def test_terminal_auth_boundary_and_untrusted_question_not_executed(self):
-        from urllib.error import HTTPError
-        with self.assertRaises(HTTPError) as error:
-            request = Request(self.url + '/api/terminal/start', data=json.dumps({'dataset':self.dataset}).encode(),
-                              headers={'Content-Type':'application/json', 'Origin':'https://evil.invalid'})
-            urlopen(request)
-        self.assertEqual(error.exception.code, 403)
 
 
 if __name__ == '__main__':

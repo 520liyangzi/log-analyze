@@ -1,2 +1,2 @@
-# Only the interactive browser terminal on Windows needs this dependency.
-pywinpty==3.0.5; sys_platform == 'win32'
+# Runtime uses Python's standard library; no third-party packages required.
+# Building the Windows EXE separately installs PyInstaller via build_exe.ps1.

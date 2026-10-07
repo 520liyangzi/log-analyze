@@ -93,7 +93,7 @@
   }
   async function capability(){
     const result=await api('/api/chat/capability');configured=result.configured;$('#chatCapability').textContent=result.message;
-    $('.chat-status-dot').classList.toggle('ready',configured);$('.legacy-nav').hidden=!result.local_terminal;
+    $('.chat-status-dot').classList.toggle('ready',configured);
     if(!$('#chatProjectPath').value)$('#chatProjectPath').value=storage('logscope.chat.project')||result.default_project_path;
     controls();
   }
@@ -151,7 +151,6 @@
   $('#chatNew').addEventListener('click',newSession);
   $('#chatRefresh').addEventListener('click',()=>refreshList().catch(e=>toast(e.message)));
   $('#chatRefreshConfig').addEventListener('click',()=>capability().catch(e=>toast(e.message)));
-  $('#chatRules').addEventListener('click',()=>$('#editRules').click());
   $('#chatStop').addEventListener('click',async()=>{try{await api('/api/chat/stop',{id:selected});await poll(generation);}catch(e){toast(e.message);}});
   $('#chatDelete').addEventListener('click',async()=>{
     if(!selected||!confirm('删除这个排查会话、聊天记录和报告？此操作不可恢复；不会删除日志包和项目。'))return;

@@ -3,7 +3,78 @@ const {chromium} = require('playwright');
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 
-async function maintenanceRegression(browser, sourcePage) {
+function trackTerminalRequests(page, requests) {
+  page.on('request', request => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname === '/api/terminal' || pathname.startsWith('/api/terminal/')) {
+      requests.push(`${request.method()} ${pathname}`);
+    }
+  });
+}
+
+async function legacyViewRegression(browser, sourcePage, terminalRequests) {
+  const datasets = await (await sourcePage.request.get('http://127.0.0.1:8879/api/datasets')).json();
+  const dataset = datasets.find(item => item.state === 'ready');
+  const context = await browser.newContext({viewport:{width:1440,height:1120}});
+  await context.addInitScript(value => {
+    // Seed once: the reload below must read the application's migrated value.
+    if (!localStorage.getItem('logscope.ui.v1')) localStorage.setItem('logscope.ui.v1', JSON.stringify(value));
+  }, {dataset:dataset.id, view:'terminal'});
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  trackTerminalRequests(page, terminalRequests);
+  try {
+    await page.goto('http://127.0.0.1:8879');
+    await page.waitForFunction(() => state.view === 'chat' &&
+      JSON.parse(localStorage.getItem('logscope.ui.v1')).view === 'chat');
+    await page.locator('#chatView').waitFor({state:'visible'});
+    assert.equal(await page.locator('[data-view="terminal"], #terminalView').count(), 0,
+      'removed terminal must not remain as a hidden view or navigation entry');
+    assert.equal(await page.locator('script[src*="terminal"]').count(), 0);
+    await page.reload();
+    await page.waitForFunction(() => state.view === 'chat');
+    await page.locator('#chatCapability').filter({hasText:'共享模型已配置'}).waitFor();
+
+    // The native editor must still save versioned rules without terminal.js.
+    await page.locator('#chatRules').click();
+    await page.locator('#rulesDialog[open]').waitFor();
+    const workflow = await page.locator('#rulesWorkflow').inputValue();
+    assert(workflow.trim(), 'native rules editor should load the existing workflow');
+    const business = await page.locator('#rulesBusiness').inputValue();
+    const marker = '浏览器回归规则：将事实证据与待验证推断分别说明。';
+    const edited = business ? business + '\n' + marker : marker;
+    await page.locator('#rulesBusiness').fill(edited);
+    await page.locator('#rulesNote').fill('native-rules-browser-regression');
+    const [savedResponse] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === '/api/analysis/rules' && response.request().method() === 'POST'),
+      page.locator('#saveRules').click(),
+    ]);
+    assert.equal(savedResponse.status(), 200);
+    const saved = await savedResponse.json();
+    assert.equal(saved.business, edited);
+    assert.equal(saved.workflow, workflow);
+    await page.locator('#rulesDialog').waitFor({state:'hidden'});
+    await page.locator('#chatRules').click();
+    await page.locator('#rulesDialog[open]').waitFor();
+    assert.equal(await page.locator('#rulesBusiness').inputValue(), edited);
+    assert.equal(await page.locator(`#rulesHistory option[value="${saved.version}"]`).count(), 1);
+    await page.locator('#rulesDialog .close').click();
+    await page.locator('#chatQuestion').fill('根据已有日志检查接口异常。');
+    await page.locator('#chatSend').click();
+    await page.locator('#chatPreviewDialog[open]').waitFor();
+    assert((await page.locator('#chatPreviewText').innerText()).includes(marker),
+      'new native task previews must use the saved business rules');
+    await page.locator('#chatPreviewDialog .close').click();
+    assert.deepEqual(errors, []);
+    assert.deepEqual(terminalRequests, [], 'native pages must never call a removed terminal API');
+  } catch (error) {
+    await page.screenshot({path:'test-results/chat-legacy-migration-failure.png',fullPage:true});
+    throw error;
+  } finally { await context.close(); }
+}
+
+async function maintenanceRegression(browser, sourcePage, terminalRequests) {
   const datasets = await (await sourcePage.request.get('http://127.0.0.1:8879/api/datasets')).json();
   const dataset = datasets.find(item => item.state === 'ready');
   const files = await (await sourcePage.request.get(`http://127.0.0.1:8879/api/files?dataset=${dataset.id}`)).json();
@@ -16,6 +87,7 @@ async function maintenanceRegression(browser, sourcePage) {
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
+  trackTerminalRequests(page, terminalRequests);
   let blocked = true, failStatus = false, cancelCalls = 0;
   let status = {enabled:true, hours:72, schedule:'02:00', timezone:'中国标准时间',
     phase:'running', maintenance:true, can_cancel:true, next_run:null, last_result:null,
@@ -86,6 +158,7 @@ async function maintenanceRegression(browser, sourcePage) {
   // The initial 503 may finish before the first (already idle) status response.
   // Recovery must not depend on observing a running -> idle transition.
   const recovered = await browser.newPage();
+  trackTerminalRequests(recovered, terminalRequests);
   let datasetCalls = 0;
   await recovered.route('**/api/datasets', route => ++datasetCalls === 1
     ? route.fulfill({status:503,json:{code:'INDEX_MAINTENANCE',error:'正在结束维护'}})
@@ -103,7 +176,9 @@ async function maintenanceRegression(browser, sourcePage) {
   const browser = await chromium.launch({headless:true});
   const page = await browser.newPage({viewport:{width:1440,height:1120}});
   const errors = [];
+  const terminalRequests = [];
   page.on('pageerror', error => errors.push(error.message));
+  trackTerminalRequests(page, terminalRequests);
   fs.mkdirSync('test-results', {recursive:true});
   try {
     for(let i=0;i<30;i++) {
@@ -120,7 +195,8 @@ async function maintenanceRegression(browser, sourcePage) {
     assert.equal(await archive.failure(),null);
     await page.screenshot({path:'test-results/retention-archives.png',fullPage:true});
     await page.locator('#retainedDialog .close').click();
-    await maintenanceRegression(browser,page);
+    await maintenanceRegression(browser,page,terminalRequests);
+    await legacyViewRegression(browser,page,terminalRequests);
     await page.locator('[data-view="chat"]').click();
     await page.locator('#chatCapability').filter({hasText:'共享模型已配置'}).waitFor();
     await page.locator('#chatQuestion').fill('帮我分析 /api/model/map 为什么报错，需要给出日志证据。');
@@ -160,7 +236,8 @@ async function maintenanceRegression(browser, sourcePage) {
     await page.locator('#chatDelete').click();
     await page.locator('#chatTitle').filter({hasText:'新建排查'}).waitFor();
     assert.equal(await page.locator('[data-chat-session]').count(),0);
-    console.log('Browser regression passed: maintenance 503/drafts/progress/cancel/recovery, retained ZIP/download, preview, tools, evidence, follow-up, reload, drafts, rules, sessions, mobile, delete.');
+    assert.deepEqual(terminalRequests, [], 'all browser flows must avoid removed terminal APIs');
+    console.log('Browser regression passed: maintenance 503/drafts/progress/cancel/recovery, retained ZIP/download, terminal-view migration, no terminal API requests, native rules save/preview, tools, evidence, follow-up, reload, drafts, sessions, mobile, delete.');
   } catch(error) {
     await page.screenshot({path:'test-results/chat-failure.png',fullPage:true});
     throw error;

@@ -7,6 +7,7 @@ const UI_STATE_KEY = 'logscope.ui.v1';
 const COLLECT_JOB_KEY = 'logscope.collector.job';
 let savedUI={};
 try { savedUI=JSON.parse(localStorage.getItem(UI_STATE_KEY)||'{}'); } catch {}
+if(savedUI.view==='terminal')savedUI.view='chat';
 const state = { dataset: savedUI.dataset || '', datasets: [], files: [], view: 'search', page: 1, tracePage: 1, lastSearch: null, lastTrace: null, rows: new Map(), searchSerial: 0, traceSerial: 0, refreshSerial: 0, correlation: null, collectionSerial: 0, uiRestored: false, datasetsLoading: false, datasetRefreshPending: true };
 let datasetRetryTimer;
 let collectorEnvironments=[];
@@ -81,10 +82,10 @@ const viewMeta = {
   search:['全局搜索','每一条日志，都有迹可循。','跨节点搜索，从接口请求一路定位到异常现场。'],
   trace:['流水号追踪','把一次请求，完整串起来。','跨 Pod 汇集同一流水号，按时间还原请求过程。'],
   files:['日志文件','每个节点，每份日志。','查看解析到的原始文件及其完整压缩包来源。'],
-  chat:['AI 排查','说出问题，让证据回答。','直接对话，查询日志与项目代码；过程可见，结果可追溯。'],
-  terminal:['旧版终端','旧版终端与历史记录','保留已有 CLI 会话；新排查推荐使用原生 AI 对话。']
+  chat:['AI 排查','说出问题，让证据回答。','直接对话，查询日志与项目代码；过程可见，结果可追溯。']
 };
 function setView(view) {
+  if(view==='terminal')view='chat';
   if(!viewMeta[view])view='search';
   state.view = view;
   $$('.nav').forEach(b => b.classList.toggle('active', b.dataset.view === view));

@@ -25,7 +25,6 @@ python -m PyInstaller `
   --add-data $skillAssets `
   --hidden-import urllib.error `
   --hidden-import urllib.request `
-  --collect-all winpty `
   app.py
 
 if ($LASTEXITCODE -ne 0) {

@@ -3,6 +3,7 @@ import http.client
 import io
 import json
 import select
+import socket
 import ssl
 import threading
 import time
@@ -90,31 +91,60 @@ class ModelConfig:
                 pass
 
     def load(self, required=True):
+        def invalid(reason):
+            return ValueError(f'本机 data/ai-config.json 配置无效：{reason}；配置内容不会返回页面。')
+
         try:
-            value = json.loads(self.path.read_text('utf-8-sig'))
-            if not isinstance(value, dict):
-                raise ValueError()
-            config = {**DEFAULT_CONFIG, **value}
-            if config['provider'] not in ('openai', 'anthropic'):
-                raise ValueError()
-            if config['openai_token_parameter'] not in ('max_tokens', 'max_completion_tokens'):
-                raise ValueError()
-            for key in ('base_url', 'api_key', 'model', 'default_project_path'):
-                if not isinstance(config[key], str) or '\n' in config[key] or '\r' in config[key]:
-                    raise ValueError()
-            if not isinstance(config['stream'], bool):
-                raise ValueError()
-            for key, low, high in (('timeout_seconds', 5, 600), ('max_output_tokens', 256, 16000),
-                                   ('max_tool_rounds', 1, 20), ('max_context_chars', 20000, 500000)):
-                if type(config[key]) is not int or not low <= config[key] <= high:
-                    raise ValueError()
-            parsed = urlsplit(config['base_url'])
-            if config['base_url'] and (parsed.scheme not in ('http', 'https') or not parsed.hostname
-                                       or parsed.username or parsed.password or parsed.query or parsed.fragment):
-                raise ValueError()
-            configured = all(config[key].strip() for key in ('base_url', 'api_key', 'model'))
-        except (OSError, ValueError, TypeError):
-            raise ValueError('本机 data/ai-config.json 格式或参数无效，请由维护者检查；配置内容不会返回页面。') from None
+            raw = self.path.read_text('utf-8-sig')
+        except UnicodeError:
+            raise invalid('文件必须使用 UTF-8 编码（支持 BOM）') from None
+        except OSError:
+            raise invalid('无法读取文件，请检查文件是否存在及读取权限') from None
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            # Only positions are safe to expose: decoder messages or source lines
+            # may include the address, credentials, or other configuration values.
+            raise invalid(f'JSON 语法错误，第 {exc.lineno} 行、第 {exc.colno} 列；请检查双引号、逗号和路径反斜杠转义') from None
+        except ValueError:
+            raise invalid('JSON 数值无效，请检查数字长度和格式') from None
+        if not isinstance(value, dict):
+            raise invalid('JSON 顶层必须是对象')
+        config = {**DEFAULT_CONFIG, **value}
+        if config['provider'] not in ('openai', 'anthropic'):
+            raise invalid('provider 必须是 openai 或 anthropic；兼容 OpenAI 的接口使用 openai')
+        if config['openai_token_parameter'] not in ('max_tokens', 'max_completion_tokens'):
+            raise invalid('openai_token_parameter 必须是 max_tokens 或 max_completion_tokens')
+        for key in ('base_url', 'api_key', 'model', 'default_project_path'):
+            if not isinstance(config[key], str) or '\n' in config[key] or '\r' in config[key]:
+                raise invalid(f'{key} 必须是字符串，且不能包含换行或回车')
+        if not isinstance(config['stream'], bool):
+            raise invalid('stream 必须是 true 或 false，不能加引号')
+        for key, low, high in (('timeout_seconds', 5, 600), ('max_output_tokens', 256, 16000),
+                               ('max_tool_rounds', 1, 20), ('max_context_chars', 20000, 500000)):
+            if type(config[key]) is not int or not low <= config[key] <= high:
+                raise invalid(f'{key} 必须是 {low}–{high} 之间的整数，不能加引号')
+
+        # Copy/paste often leaves normal or non-breaking spaces after /v1.
+        # Normalize only the URL; never rewrite credentials or the source file.
+        config['base_url'] = config['base_url'].strip()
+        if config['base_url']:
+            if any(char.isspace() or not char.isprintable() for char in config['base_url']):
+                raise invalid('base_url 中间不能包含空白或控制字符')
+            try:
+                parsed = urlsplit(config['base_url'])
+                port = parsed.port
+            except ValueError:
+                raise invalid('base_url 的主机或端口格式无效；端口必须是 1–65535 的整数') from None
+            if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+                raise invalid('base_url 必须是包含主机的 http:// 或 https:// 地址')
+            if port is not None and not 1 <= port <= 65535:
+                raise invalid('base_url 的端口必须是 1–65535 的整数')
+            if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+                raise invalid('base_url 不能包含用户名、密码、查询参数或片段')
+            if not parsed.path.isascii():
+                raise invalid('base_url 路径中的非 ASCII 字符必须先进行 URL 百分号编码')
+        configured = all(config[key].strip() for key in ('base_url', 'api_key', 'model'))
         if required and not configured:
             raise ValueError('模型尚未配置，请维护者填写本机 data/ai-config.json 的 base_url、api_key 和 model。')
         return config
@@ -194,6 +224,8 @@ class ModelClient:
         else:
             headers['Authorization'] = 'Bearer ' + self.config['api_key']
         timeout = self.config['timeout_seconds']
+        # http.client connects directly: environment/system proxy settings are
+        # unused rather than routing internal endpoints through a configured proxy.
         factory = http.client.HTTPSConnection if parsed.scheme == 'https' else http.client.HTTPConnection
         connection = factory(parsed.hostname, parsed.port, timeout=timeout)
         with self.lock:
@@ -219,7 +251,19 @@ class ModelClient:
                 raise Cancelled()
             response = connection.getresponse()
             if response.status != 200:
-                raise ValueError(f'模型接口返回 HTTP {response.status}。请维护者检查配置、额度和工具调用支持；服务端原始错误不回显。')
+                if response.status in (401, 403):
+                    reason = '认证或访问权限被拒绝，请检查 api_key、模型权限及服务端访问限制'
+                elif response.status == 404:
+                    reason = '接口路径不存在，请检查 base_url 与服务端的模型接口路径'
+                elif response.status == 407:
+                    reason = '服务入口要求代理认证；程序使用直连，请检查网关和 base_url 是否正确'
+                elif response.status == 429:
+                    reason = '请求频率或额度受限，请稍后重试并检查服务端配额'
+                elif 500 <= response.status <= 599:
+                    reason = '模型服务或网关异常，请检查服务端状态后重试'
+                else:
+                    reason = '请检查模型配置、接口协议和工具调用支持'
+                raise ValueError(f'模型接口返回 HTTP {response.status}：{reason}；服务端原始错误不回显。')
             if 'text/event-stream' not in response.getheader('Content-Type', ''):
                 raw = response.read(2 * 1024 * 1024 + 1)
                 if len(raw) > 2 * 1024 * 1024:
@@ -295,10 +339,33 @@ class ModelClient:
                         raise ValueError('模型返回的工具调用格式不正确')
                     json.loads(call['function']['arguments'] or '{}')
             return result, finish in ('length', 'max_tokens')
-        except (OSError, http.client.HTTPException, KeyError, TypeError, json.JSONDecodeError):
+        except (OSError, http.client.HTTPException, KeyError, TypeError, IndexError,
+                AttributeError, UnicodeError, json.JSONDecodeError) as exc:
             if self.stop.is_set():
                 raise Cancelled() from None
-            raise ValueError('模型连接失败、超时或返回格式不兼容，请维护者检查模型配置；地址和密钥不会回显。') from None
+            # Never forward exception text: network and parser errors can embed
+            # private hostnames, URL components, credentials, or response bodies.
+            if isinstance(exc, ssl.SSLCertVerificationError):
+                reason = '模型 TLS 证书校验失败，请检查服务端证书和本机信任的证书链'
+            elif isinstance(exc, ssl.SSLError):
+                reason = '模型 TLS 连接失败，请检查 HTTPS 协议、端口和服务端 TLS 配置'
+            elif isinstance(exc, socket.gaierror):
+                reason = '模型主机名解析失败，请检查 base_url 主机名、DNS 和公司网络或 VPN'
+            elif isinstance(exc, TimeoutError):
+                reason = '模型直连超时，请检查服务地址、端口、公司网络或 VPN，以及 timeout_seconds'
+            elif isinstance(exc, ConnectionRefusedError):
+                reason = '模型直连被拒绝，请检查服务是否启动、端口和防火墙规则'
+            elif isinstance(exc, (ConnectionResetError, BrokenPipeError, http.client.RemoteDisconnected)):
+                reason = '模型连接被服务端或网关中断，请检查服务状态后重试'
+            elif isinstance(exc, OSError):
+                reason = '模型直连失败，请检查公司网络或 VPN、路由和防火墙；程序不使用系统或环境代理'
+            elif isinstance(exc, http.client.HTTPException):
+                reason = '模型 HTTP 通信失败，请检查 base_url 协议、端口和网关响应'
+            elif isinstance(exc, UnicodeError):
+                reason = '模型请求或响应编码无效，请检查 URL、密钥字符与接口响应编码'
+            else:
+                reason = '模型返回格式不兼容，请检查 provider、模型接口协议和工具调用支持'
+            raise ValueError(f'{reason}；地址、密钥和原始响应不会回显。') from None
         finally:
             if response is not None:
                 response.close()

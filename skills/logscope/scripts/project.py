@@ -10,7 +10,7 @@ import sys
 def task():
     path = Path.cwd() / 'code-task.json'
     if not path.exists():
-        raise ValueError('当前目录没有 code-task.json，请先从页面创建代码定位任务')
+        raise ValueError('当前目录没有 code-task.json，请准备包含 project_root、branch、commit 的配置，参见 docs/AGENT.md')
     return json.loads(path.read_text('utf-8'))
 
 

@@ -3,6 +3,7 @@ import argparse
 import io
 import json
 import time
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import zipfile
@@ -33,11 +34,22 @@ def run(base):
             time.sleep(.1)
         raise AssertionError(f'Packaged import did not reach {wanted}: {latest}')
 
-    for path, expected_type in (('/import-layout.js', 'javascript'), ('/import-layout.css', 'text/css')):
+    for path, expected_type in (('/import-layout.js', 'javascript'), ('/import-layout.css', 'text/css'),
+                                ('/analysis-rules.js', 'javascript')):
         with urlopen(base + path, timeout=15) as response:
             assert response.status == 200, path
             assert expected_type in response.headers['Content-Type'], path
             assert response.read(), 'Empty packaged asset: ' + path
+
+    for path, payload in (('/terminal.js', None), ('/vendor/xterm.js', None),
+                          ('/api/terminal/config', None), ('/api/terminal/start', {})):
+        try:
+            request(path, payload)
+        except HTTPError as error:
+            with error:
+                assert error.code == 404, 'Retired terminal route returned ' + str(error.code) + ': ' + path
+        else:
+            raise AssertionError('Retired terminal route remains available: ' + path)
 
     archive_bytes = io.BytesIO()
     with zipfile.ZipFile(archive_bytes, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
@@ -67,7 +79,7 @@ def run(base):
     assert 'exe-smoke.zip' in record['source'] and MEMBER in record['source'], record
     _, evidence = request('/api/verify?' + urlencode({'id': record['id']}))
     assert evidence['verified'] and MARKER in evidence['raw'], evidence
-    print('Packaged import smoke passed: assets, scan-only review, edited layout, confirm, search and ZIP evidence.')
+    print('Packaged smoke passed: native assets, no terminal routes, scan-only review, edited layout, confirm, search and ZIP evidence.')
 
 
 if __name__ == '__main__':
