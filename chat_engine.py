@@ -3,6 +3,7 @@ import concurrent.futures
 import contextlib
 import copy
 import datetime as dt
+import itertools
 import json
 from pathlib import Path
 import shutil
@@ -158,6 +159,27 @@ class ChatManager:
                        (event_id, identifier, self.version, kind, dumps(body)))
         return event_id
 
+    def _resume_partial(self, session):
+        """Carry the latest interrupted reply into a follow-up, including old sessions.
+
+        Events are the durable source for text received before a transport error
+        or process restart. Never recover unvalidated tool-call fragments.
+        """
+        with self.db() as db:
+            row = db.execute('''SELECT id,body FROM events WHERE session=? AND kind='assistant'
+                AND position > coalesce((SELECT max(position) FROM events WHERE session=? AND kind='user'),0)
+                ORDER BY position DESC LIMIT 1''', (session['id'], session['id'])).fetchone()
+        if not row or session.get('resumed_partial_event') == row['id']:
+            return
+        body = json.loads(row['body'])
+        text = body.get('text')
+        if not body.get('interrupted') or not isinstance(text, str) or not text.strip():
+            return
+        session['wire'].append(dict(role='assistant', content=(
+            '[上轮回复已中断，以下是未完成的部分文字，仅用于衔接对话，不是已核验的结论；'
+            '工具是否执行、证据是否成立，以已保存的工具结果为准。]\n' + text)))
+        session['resumed_partial_event'] = row['id']
+
     def preview(self, body):
         question = str(body.get('question', '')).strip()
         if not question or len(question) > 20000:
@@ -180,7 +202,11 @@ class ChatManager:
         system += '\n\n本次日志范围与代码版本：\n' + dumps(task)
         system += '\n\n分析规则（其中旧 CLI 命令用同义内置工具代替，不运行终端）：\n' + rules['workflow']
         system += '\n\n业务规则：\n' + (rules['business'] or '暂无')
-        text = system + '\n\n可用工具：\n' + dumps(self.tools(task)) + '\n\n用户本次问题：\n' + question
+        continuity = ('继续当前会话：发送时携带之前的问题、回答和查询结果；中断文字标为未完成。'
+                      '超出上下文预算时会省略部分早期证据或轮次，完整历史仍保留。'
+                      if existing else '新建会话：本次为第一个问题，后续可在同一会话继续追问。')
+        text = (system + '\n\n可用工具：\n' + dumps(self.tools(task))
+                + '\n\n对话上下文：\n' + continuity + '\n\n用户本次问题：\n' + question)
         token = uuid.uuid4().hex
         with self.lock:
             self.previews = {k: v for k, v in self.previews.items() if time.monotonic() - v['at'] < 1800}
@@ -219,6 +245,7 @@ class ChatManager:
                 session = self._get(identifier)
                 if session['updated'] != draft['expected_updated']:
                     raise ValueError('其他页面已更新这个会话，请刷新并重新预览')
+                self._resume_partial(session)
             else:
                 session = dict(id=identifier, title=draft['question'][:60], created=now(), wire=[],
                                state='idle', status='', task=draft['task'])
@@ -255,15 +282,18 @@ class ChatManager:
         removed = False
         while len(dumps(result)) > maximum:
             next_turn = next((i for i, m in enumerate(result[1:], 1) if m['role'] == 'user'), None)
+            # Retain the user's earlier questions and the model's conclusions
+            # before dropping a whole turn just because one evidence blob is big.
+            candidate = next((m for m in result if m['role'] == 'tool' and len(m['content']) > 1000), None)
+            if candidate is not None:
+                candidate['content'] = '{"note":"较早工具结果因上下文预算省略；完整结果仍在界面证据中，需要时重新查询，不得据此断言无结果。"}'
+                removed = True
+                continue
             if next_turn is not None:
                 result = result[next_turn:]
                 removed = True
                 continue
-            candidate = next((m for m in result if m['role'] == 'tool' and len(m['content']) > 1000), None)
-            if candidate is None:
-                raise ValueError('本次上下文超过配置上限，请缩小问题范围或新建会话')
-            candidate['content'] = '{"note":"较早工具结果因上下文预算省略；完整结果仍在界面证据中，不得据此断言无结果。"}'
-            removed = True
+            raise ValueError('本次上下文超过配置上限，请缩小问题范围或新建会话')
         return result, removed
 
     def execute(self, session, name, args):
@@ -316,11 +346,10 @@ class ChatManager:
         seen = set()
         event_id, latest_text = None, ['']
         try:
-            for index in range(client.config['max_tool_rounds'] + 1):
+            for index in itertools.count():
                 if stop.is_set():
                     raise Cancelled()
-                final_round = index == client.config['max_tool_rounds']
-                self._status(identifier, status=f'第 {index + 1} 轮：等待模型分析…')
+                self._status(identifier, status=f'第 {index + 1} 次模型分析：等待响应…')
                 event_id = self.event(identifier, 'assistant', dict(text='', streaming=True, round=index + 1))
                 latest_text[0] = ''
                 before, last_saved = time.monotonic(), [0.0]
@@ -334,8 +363,10 @@ class ChatManager:
                         self.event(identifier, 'assistant', dict(text=text, streaming=True, round=index + 1), event_id)
                         last_saved[0] = time.monotonic()
 
-                system = session['system'] + ('\n已达工具轮数上限。请基于现有证据给出结论与未解决项，不再请求工具。' if final_round else '')
-                response, incomplete = client.complete(system, context, [] if final_round else self.tools(session['task']), on_text)
+                system = session['system']
+                if shortened:
+                    system += '\n本轮有部分早期历史或工具结果因预算省略。请依据保留的上下文回答；若无法确定追问所指，明确询问，不要猜测缺失内容。'
+                response, incomplete = client.complete(system, context, self.tools(session['task']), on_text)
                 self.event(identifier, 'assistant', dict(text=response['content'], streaming=False, round=index + 1,
                                                         elapsed_ms=round((time.monotonic() - before) * 1000)), event_id)
                 calls = response.get('tool_calls', [])
@@ -354,8 +385,6 @@ class ChatManager:
                     (self.directory / identifier / 'report.md').write_text(report, 'utf-8')
                     self._status(identifier, state='idle', status='本轮完成，可继续追问。' + (' 输出达到长度上限。' if incomplete else ''))
                     return
-                if final_round:
-                    raise ValueError('已到排查轮数上限，模型仍请求工具；证据已保存，可继续追问')
                 messages.append(response)
                 # Persist complete tool-call/result pairs even if interrupted midway.
                 results = [dict(role='tool', tool_call_id=c['id'], content='{"error":"本工具尚未执行或已停止"}') for c in calls]

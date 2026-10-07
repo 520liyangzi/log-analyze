@@ -39,6 +39,75 @@ async function reloadWithDelayedChat(page, sessionId) {
   }
 }
 
+async function sessionLoadRecoveryRegression(page, sessionId, expectedProject) {
+  let releaseLoad;
+  const loadGate = new Promise(resolve => { releaseLoad = resolve; });
+  let failedOnce = false;
+  const attemptedTurns = [];
+  const trackTurns = request => {
+    if (request.method() === 'POST' && ['/api/chat/preview', '/api/chat/send'].includes(new URL(request.url()).pathname))
+      attemptedTurns.push(request);
+  };
+  const firstLoadFails = async route => {
+    const url = new URL(route.request().url());
+    if (!failedOnce && url.searchParams.get('id') === sessionId && !url.searchParams.has('after')) {
+      failedOnce = true;
+      await loadGate;
+      await route.fulfill({status:503, json:{error:'测试：会话记录暂时无法读取，请重试'}});
+    } else await route.continue();
+  };
+  page.on('request', trackTurns);
+  await page.route('**/api/chat/session?*', firstLoadFails);
+  try {
+    const loading = page.waitForRequest(request => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/chat/session' && url.searchParams.get('id') === sessionId && !url.searchParams.has('after');
+    });
+    await page.locator(`[data-chat-session="${sessionId}"]`).click();
+    await loading;
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('logscope.chat.selected')), sessionId);
+    assert.equal(await page.locator('#chatSend').isDisabled(), true, 'switching conversations must block sends while history loads');
+    const draft = '历史加载期间写下的追问，恢复后继续同一个会话。';
+    await page.locator('#chatQuestion').fill(draft);
+    await page.locator('#chatQuestion').press('Control+Enter');
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
+    assert.equal(attemptedTurns.length, 0, 'the send hotkey must also respect the history-loading guard');
+
+    releaseLoad();
+    await page.locator('#chatRetrySession').waitFor({state:'visible'});
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('logscope.chat.selected')), sessionId,
+      'a failed history request must not silently turn a follow-up into a new conversation');
+    assert.equal(await page.locator('#chatSend').isDisabled(), true);
+    await page.locator('#chatQuestion').press('Control+Enter');
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
+    assert.equal(attemptedTurns.length, 0, 'failed history must remain unsendable until it is reloaded');
+    await page.screenshot({path:'test-results/chat-session-retry.png', fullPage:true});
+
+    await page.locator('#chatRetrySession').click();
+    await page.locator('#chatMessages').filter({hasText:'代码版本已固定，Service.java 中 browser-code-v1 是本轮代码证据'}).waitFor();
+    await page.locator('#chatScope').filter({hasText:expectedProject.commit.slice(0,10)}).waitFor();
+    assert.equal(await page.locator('#chatUseCode').isChecked(), true);
+    assert.equal(await page.locator('#chatRemoteUrl').inputValue(), expectedProject.remote_url);
+    assert.equal(await page.locator('#chatBranch').inputValue(), expectedProject.branch);
+    assert.equal(await page.locator('#chatQuestion').inputValue(), draft);
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('logscope.chat.selected')), sessionId);
+    const [preview] = await Promise.all([
+      page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/api/chat/preview'),
+      page.locator('#chatSend').click(),
+    ]);
+    assert.equal(preview.postDataJSON().id, sessionId);
+    await page.locator('#chatPreviewDialog[open]').waitFor();
+    await page.locator('#chatPreviewTitle').filter({hasText:'继续当前对话'}).waitFor();
+    assert((await page.locator('#chatPreviewText').innerText()).includes(expectedProject.commit),
+      'a recovered follow-up must keep its original fixed code revision');
+    await page.locator('#chatPreviewDialog .close').click();
+  } finally {
+    releaseLoad();
+    await page.unroute('**/api/chat/session?*', firstLoadFails);
+    page.off('request', trackTurns);
+  }
+}
+
 async function legacyViewRegression(browser, sourcePage, terminalRequests) {
   const datasets = await (await sourcePage.request.get('http://127.0.0.1:8879/api/datasets')).json();
   const dataset = datasets.find(item => item.state === 'ready');
@@ -215,8 +284,7 @@ async function projectRepositoryRegression(browser, terminalRequests) {
       document.querySelector('#chatBranch').value === branch, repository.branch);
     assert.equal((await (await page.request.get('http://127.0.0.1:8879/api/chat/projects')).json()).repositories.length, 1,
       'repeated updates of a remembered URL must reuse its managed clone');
-    await page.locator(`[data-chat-session="${sessionId}"]`).click();
-    await page.locator('#chatScope').filter({hasText:repository.initial_commit.slice(0,10)}).waitFor();
+    await sessionLoadRecoveryRegression(page, sessionId, history.session.task.project);
     page.on('dialog', dialog => dialog.accept());
     await page.locator('#chatDelete').click();
     await page.locator('#chatTitle').filter({hasText:'新建排查'}).waitFor();
@@ -375,21 +443,40 @@ async function maintenanceRegression(browser, sourcePage, terminalRequests) {
     const preview = await page.locator('#chatPreviewText').innerText();
     assert(!preview.includes('fake-secret'));
     assert(!preview.includes('http://127.0.0.1:'));
+    let listFailures = 0;
+    const failFirstListRefresh = route => listFailures++ === 0
+      ? route.fulfill({status:503, json:{error:'测试：会话列表暂时无法刷新'}})
+      : route.continue();
+    await page.route('**/api/chat/sessions', failFirstListRefresh);
     await page.locator('#chatConfirm').click();
     await page.locator('#chatMessages').filter({hasText:'时间关联本身不能证明代码根因'}).waitFor();
+    assert(listFailures >= 1, 'the first send must survive an actual failed sidebar refresh');
+    await page.unroute('**/api/chat/sessions', failFirstListRefresh);
+    const savedSessions = await (await page.request.get('http://127.0.0.1:8879/api/chat/sessions')).json();
+    assert.equal(savedSessions.length, 1);
+    const createdSessionId = savedSessions[0].id;
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('logscope.chat.selected')), createdSessionId,
+      'the successful send must save its conversation ID even when the list refresh fails');
     await page.locator('.chat-tool summary').first().click();
     await page.screenshot({path:'test-results/chat-desktop.png',fullPage:true});
     await page.locator('[data-chat-log]').first().click();
     await page.locator('#contextDialog[open]').waitFor();
     await page.locator('#contextDialog .close').click();
     await page.locator('#chatQuestion').fill('是否有下游连接池异常？');
-    await page.locator('#chatSend').click();
+    const [followUpPreview] = await Promise.all([
+      page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/api/chat/preview'),
+      page.locator('#chatSend').click(),
+    ]);
+    assert.equal(followUpPreview.postDataJSON().id, createdSessionId,
+      'a follow-up after a sidebar failure must target the original conversation');
+    await page.locator('#chatPreviewTitle').filter({hasText:'继续当前对话'}).waitFor();
     await page.locator('#chatConfirm').click();
     await page.locator('#chatMessages').filter({hasText:'继续查看上下文可以验证该请求是否受下游连接池影响'}).waitFor();
     await page.reload();
     await page.locator('#chatMessages').filter({hasText:'是否有下游连接池异常？'}).waitFor();
     const sessionId = await page.locator('[data-chat-session].active').getAttribute('data-chat-session');
     assert(sessionId, 'restored conversation must appear as the active saved session');
+    assert.equal(sessionId, createdSessionId);
     await page.locator('#chatQuestion').fill('保留未发送草稿');
     await reloadWithDelayedChat(page, sessionId);
     await page.locator('#chatRules').click();
@@ -409,7 +496,7 @@ async function maintenanceRegression(browser, sourcePage, terminalRequests) {
     assert.equal(await page.locator('[data-chat-session]').count(),0);
     await projectRepositoryRegression(browser, terminalRequests);
     assert.deepEqual(terminalRequests, [], 'all browser flows must avoid removed terminal APIs');
-    console.log('Browser regression passed: maintenance 503/drafts/progress/cancel/recovery, legacy ZIP/download/delete, terminal-view migration, no terminal API requests, native rules save/preview, tools, evidence, follow-up, delayed chat startup/reload, drafts, sessions, mobile, delete, Git URL clone/fetch/branch/commit/history/refresh.');
+    console.log('Browser regression passed: maintenance 503/drafts/progress/cancel/recovery, legacy ZIP/download/delete, terminal-view migration, no terminal API requests, native rules save/preview, tools, evidence, follow-up across list failure, history loading/error/retry guards, delayed chat startup/reload, drafts, sessions, mobile, delete, Git URL clone/fetch/branch/commit/history/refresh.');
   } catch(error) {
     await page.screenshot({path:'test-results/chat-failure.png',fullPage:true});
     throw error;

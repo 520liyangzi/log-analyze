@@ -143,7 +143,9 @@ class NativeChatTests(unittest.TestCase):
         self.temp.cleanup()
 
     def preview(self, **changes):
-        return self.chat.preview(dict(dataset=self.dataset, question='请排查 /api/model/map 的异常', **changes))
+        body = dict(dataset=self.dataset, question='请排查 /api/model/map 的异常')
+        body.update(changes)
+        return self.chat.preview(body)
 
     def send(self, draft, request='request-1'):
         return self.chat.send(dict(preview_id=draft['preview_id'], request_id=request))
@@ -236,6 +238,148 @@ class NativeChatTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.send(b, 'stale-turn')
 
+    def test_three_turn_followup_sends_prior_questions_answers_and_tool_evidence(self):
+        self.model.replies = [response('先查日志', [('search_logs', dict(q='timeout'))]),
+                              response('第一轮结论：发现超时线索。'),
+                              response('第二轮结论：继续检查关联条件。'),
+                              response('第三轮结论：需要额外核验。')]
+        questions = ['第一问：定位接口超时', '第二问：请说明候选关系', '第三问：如何验证原因']
+        session = self.send(self.preview(question=questions[0]), 'three-turn-first')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
+        first_wire = copy.deepcopy(self.chat._get(session['id'])['wire'])
+        tool_answers = [m for m in first_wire if m['role'] == 'tool']
+        self.assertEqual(len(tool_answers), 1)
+        self.assertIn('rows', json.loads(tool_answers[0]['content']))
+
+        self.send(self.preview(id=session['id'], question=questions[1]), 'three-turn-second')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
+        second_request = self.model.requests[-1]['messages']
+        self.assertEqual(second_request[1:-1], first_wire)
+        self.assertEqual(second_request[-1], dict(role='user', content=questions[1]))
+        second_wire = copy.deepcopy(self.chat._get(session['id'])['wire'])
+
+        self.send(self.preview(id=session['id'], question=questions[2]), 'three-turn-third')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
+        third_request = self.model.requests[-1]['messages']
+        self.assertEqual(third_request[1:-1], second_wire)
+        self.assertEqual([m['content'] for m in third_request if m['role'] == 'user'], questions)
+        self.assertEqual([m for m in third_request if m['role'] == 'tool'], tool_answers)
+        for answer in ('第一轮结论：发现超时线索。', '第二轮结论：继续检查关联条件。'):
+            self.assertTrue(any(m['role'] == 'assistant' and m.get('content') == answer for m in third_request))
+
+        # A new investigation has its own wire history even on the same dataset.
+        self.model.replies = [response('独立会话的回答')]
+        separate = self.send(self.preview(question='一个独立的新问题'), 'three-turn-separate')
+        self.assertEqual(self.wait(separate['id'])['session']['state'], 'idle')
+        self.assertNotEqual(separate['id'], session['id'])
+        self.assertEqual(self.model.requests[-1]['messages'][1:],
+                         [dict(role='user', content='一个独立的新问题')])
+
+    def test_broken_reply_is_recovered_once_before_followup_without_tool_fragments(self):
+        self.model.replies = ['broken']
+        session = self.send(self.preview(question='首次排查问题'), 'recover-broken-first')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'failed')
+        self.assertEqual(self.chat.report(session['id'])['text'], '')
+        self.assertEqual([m['role'] for m in self.chat._get(session['id'])['wire']], ['user'])
+
+        self.model.replies = [response('已接着分析')]
+        self.send(self.preview(id=session['id'], question='继续刚才的分析'), 'recover-broken-followup')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
+        messages = self.model.requests[-1]['messages'][1:]
+        self.assertEqual([m['role'] for m in messages], ['user', 'assistant', 'user'])
+        recovered = messages[1]
+        self.assertIn('部分结果', recovered['content'])
+        self.assertRegex(recovered['content'], '中断|未完成')
+        self.assertIn('结论', recovered['content'])
+        self.assertNotIn('tool_calls', recovered)
+        self.assertEqual(messages[-1]['content'], '继续刚才的分析')
+
+        # A later failure with no received text must not resurrect an older
+        # interruption after the newer user turns, or insert its text twice.
+        self.model.replies = ['error']
+        self.send(self.preview(id=session['id'], question='检查新的线索'), 'recover-broken-empty')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'failed')
+        self.model.replies = [response('重试后完成')]
+        self.send(self.preview(id=session['id'], question='重试最新问题'), 'recover-broken-retry')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
+        messages = self.model.requests[-1]['messages'][1:]
+        self.assertEqual(sum('部分结果' in m.get('content', '') for m in messages), 1)
+        self.assertEqual(messages[1], recovered)
+        self.assertEqual(messages[-2:], [dict(role='user', content='检查新的线索'),
+                                        dict(role='user', content='重试最新问题')])
+
+    def test_stopped_reply_is_available_as_marked_context_on_next_turn(self):
+        self.model.replies = ['wait']
+        session = self.send(self.preview(question='停止之前的问题'), 'recover-stop-first')
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if any('已经收到的文字' in e['body'].get('text', '')
+                   for e in self.chat.get(session['id'])['events']):
+                break
+            time.sleep(.02)
+        else:
+            self.fail('Expected partial response before requesting cancellation')
+        self.chat.stop(session['id'])
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'stopped')
+        self.model.gate.set()
+        self.assertEqual(self.chat.report(session['id'])['text'], '')
+
+        self.model.replies = [response('停止后继续的回答')]
+        self.send(self.preview(id=session['id'], question='请从中断处继续'), 'recover-stop-followup')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
+        messages = self.model.requests[-1]['messages'][1:]
+        self.assertEqual([m['role'] for m in messages], ['user', 'assistant', 'user'])
+        self.assertIn('已经收到的文字', messages[1]['content'])
+        self.assertRegex(messages[1]['content'], '中断|未完成')
+        self.assertIn('结论', messages[1]['content'])
+        self.assertNotIn('tool_calls', messages[1])
+        self.assertEqual(messages[-1]['content'], '请从中断处继续')
+
+    def test_restart_recovers_saved_streaming_text_once_without_changing_report(self):
+        self.model.replies = ['broken']
+        session = self.send(self.preview(question='服务重启之前的问题'), 'recover-restart-first')
+        result = self.wait(session['id'])
+        event = next(e for e in result['events'] if e['kind'] == 'assistant')
+        # Recreate the durable state of a process that died during streaming:
+        # a saved user wire plus a streaming assistant event, without a reply.
+        body = dict(event['body'], text='重启之前已经收到的线索', streaming=True)
+        body.pop('interrupted', None)
+        self.chat.event(session['id'], 'assistant', body, event['id'])
+        self.chat._status(session['id'], state='running', status='正在接收回复')
+        self.chat.close()
+        self.chat.pool.shutdown(wait=True)
+        self.chat.projects.pool.shutdown(wait=True)
+        self.chat = ChatManager(self.store)
+        restored = self.chat.get(session['id'])
+        self.assertEqual(restored['session']['state'], 'interrupted')
+        restored_event = next(e for e in restored['events'] if e['id'] == event['id'])
+        self.assertTrue(restored_event['body']['interrupted'])
+        self.assertFalse(restored_event['body']['streaming'])
+        self.assertEqual(self.chat.report(session['id'])['text'], '')
+
+        self.model.replies = [response('服务恢复后继续分析')]
+        self.send(self.preview(id=session['id'], question='接着重启前的内容'), 'recover-restart-followup')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
+        messages = self.model.requests[-1]['messages'][1:]
+        self.assertEqual([m['role'] for m in messages], ['user', 'assistant', 'user'])
+        self.assertIn('重启之前已经收到的线索', messages[1]['content'])
+        self.assertRegex(messages[1]['content'], '中断|未完成')
+        self.assertIn('结论', messages[1]['content'])
+        self.assertNotIn('tool_calls', messages[1])
+
+        # Recovery bookkeeping must survive another process restart.
+        self.chat.close()
+        self.chat.pool.shutdown(wait=True)
+        self.chat.projects.pool.shutdown(wait=True)
+        self.chat = ChatManager(self.store)
+        self.model.replies = [response('继续已有历史')]
+        self.send(self.preview(id=session['id'], question='继续下一步'), 'recover-restart-again')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
+        messages = self.model.requests[-1]['messages'][1:]
+        self.assertEqual(sum('重启之前已经收到的线索' in m.get('content', '') for m in messages), 1)
+        self.assertTrue(any(m['role'] == 'assistant' and m.get('content') == '服务恢复后继续分析'
+                            for m in messages))
+
     def test_cancellation_saves_partial_and_keeps_other_sessions(self):
         self.model.replies = ['wait']
         session = self.send(self.preview())
@@ -290,6 +434,14 @@ class NativeChatTests(unittest.TestCase):
         self.model.replies = [response('重试成功')]
         self.send(self.preview(id=session['id']), 'retry-format')
         self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
+        messages = self.model.requests[-1]['messages'][1:]
+        self.assertEqual([m['role'] for m in messages], ['user', 'assistant', 'user'])
+        recovered = messages[1]
+        self.assertIn('已收到线索', recovered['content'])
+        self.assertRegex(recovered['content'], '中断|未完成')
+        self.assertIn('结论', recovered['content'])
+        self.assertNotIn('tool_calls', recovered)
+        self.assertNotIn('private-invalid-marker', json.dumps(messages))
 
     def test_tool_validation_pinned_dataset_and_repeat_guard(self):
         session = dict(task=dict(dataset=self.dataset, project=None))
@@ -304,6 +456,57 @@ class NativeChatTests(unittest.TestCase):
         events = [e for e in result['events'] if e['kind'] == 'tool']
         self.assertEqual(events[1]['body']['state'], 'failed')
         self.assertIn('相同查询', events[1]['body']['result']['error'])
+
+    def test_investigation_continues_past_legacy_round_limit_until_final_answer(self):
+        # Existing configuration files may still contain this former hard cap.
+        self.config['max_tool_rounds'] = 1
+        self.chat.config.path.write_text(json.dumps(self.config), 'utf-8')
+        rounds = 12
+        self.model.replies = [response('正在核查第 ' + str(i + 1) + ' 个线索',
+                                       [('search_logs', dict(q='unique-continuation-probe-' + str(i), size=1))])
+                              for i in range(rounds)]
+        self.model.replies.append(response('已完成全部线索核查，给出最终结论。'))
+        session = self.send(self.preview(), 'continue-past-round-limit')
+        result = self.wait(session['id'])
+        self.assertEqual(result['session']['state'], 'idle', result['session']['status'])
+        self.assertEqual(len(self.model.requests), rounds + 1)
+        self.assertTrue(all(request.get('tools') for request in self.model.requests),
+                        'Every model round must retain its available query tools')
+        tools = [e['body'] for e in result['events'] if e['kind'] == 'tool']
+        self.assertEqual(len(tools), rounds)
+        self.assertTrue(all(t['state'] == 'done' and t['name'] == 'search_logs' for t in tools))
+        self.assertEqual(len({t['args']['q'] for t in tools}), rounds)
+        self.assertIn('已完成全部线索核查', self.chat.report(session['id'])['text'])
+        self.assertFalse(any('已到排查轮数上限' in e['body'].get('text', '') for e in result['events']))
+
+    def test_cancellation_after_more_than_eight_tool_rounds_still_exits(self):
+        self.config['max_tool_rounds'] = 1
+        self.chat.config.path.write_text(json.dumps(self.config), 'utf-8')
+        rounds = 10
+        self.model.replies = [response('', [('search_logs', dict(q='stop-after-many-rounds-' + str(i), size=1))])
+                              for i in range(rounds)] + ['wait']
+        session = self.send(self.preview(), 'stop-past-round-limit')
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            result = self.chat.get(session['id'])
+            if any('已经收到的文字' in e['body'].get('text', '') for e in result['events']):
+                break
+            if result['session']['state'] not in ('running', 'stopping'):
+                self.fail('Investigation ended before reaching the cancellable round: ' + result['session']['status'])
+            time.sleep(.02)
+        else:
+            self.fail('Expected a live response after more than eight query rounds')
+        self.assertEqual(len(self.model.requests), rounds + 1)
+        self.assertTrue(all(request.get('tools') for request in self.model.requests))
+        started = time.monotonic()
+        self.chat.stop(session['id'])
+        result = self.wait(session['id'])
+        self.assertEqual(result['session']['state'], 'stopped')
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertNotIn(session['id'], self.chat.active)
+        self.assertEqual(len([e for e in result['events'] if e['kind'] == 'tool']), rounds)
+        self.assertEqual(self.chat.report(session['id'])['text'], '')
+        self.assertFalse(any(e['body'].get('streaming') for e in result['events']))
 
     def test_git_fetch_preserves_dirty_files_and_pins_old_revision(self):
         repo = self.repository()
@@ -328,6 +531,35 @@ class NativeChatTests(unittest.TestCase):
         compact, shortened = self.chat.budget(messages, 200)
         self.assertTrue(shortened)
         self.assertEqual(compact, [dict(role='user', content='new')])
+
+    def test_context_budget_shortens_old_tool_before_discarding_question_and_answer(self):
+        call = response('先检索原始线索', [('search_logs', dict(q='timeout'))])['choices'][0]['message']
+        messages = [dict(role='user', content='原问题：为什么接口超时？'), call,
+                    dict(role='tool', tool_call_id=call['tool_calls'][0]['id'],
+                         content=json.dumps(dict(rows=[dict(raw='超时日志 ' * 3000)]), ensure_ascii=False)),
+                    dict(role='assistant', content='上一轮结论：连接池等待超时，原因尚待核验。'),
+                    dict(role='user', content='继续分析连接池问题')]
+        original = copy.deepcopy(messages)
+        compact, shortened = self.chat.budget(messages, 3000)
+        self.assertTrue(shortened)
+        self.assertEqual([m['role'] for m in compact], ['user', 'assistant', 'tool', 'assistant', 'user'])
+        self.assertEqual(compact[0], original[0])
+        self.assertEqual(compact[1], original[1])
+        self.assertEqual(compact[3:], original[3:])
+        self.assertEqual(compact[2]['tool_call_id'], call['tool_calls'][0]['id'])
+        self.assertIn('省略', json.loads(compact[2]['content'])['note'])
+        self.assertLess(len(compact[2]['content']), len(original[2]['content']))
+        self.assertEqual(messages, original, 'The persisted full history must not be modified by budgeting')
+
+        # A large result in the current turn must not erase the short previous
+        # question and conclusion before any evidence compaction is attempted.
+        current = [original[0], original[3], original[4], original[1], original[2]]
+        compact, shortened = self.chat.budget(current, 3000)
+        self.assertTrue(shortened)
+        self.assertEqual(compact[:4], current[:4])
+        self.assertEqual(compact[4]['tool_call_id'], call['tool_calls'][0]['id'])
+        self.assertIn('省略', json.loads(compact[4]['content'])['note'])
+        self.assertEqual(current[4], original[2])
 
     def test_database_context_releases_connection_without_garbage_collection(self):
         with self.chat.db() as db:

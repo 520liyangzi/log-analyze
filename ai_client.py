@@ -21,7 +21,6 @@ DEFAULT_CONFIG = {
     'timeout_seconds': 120,
     'max_output_tokens': 4096,
     'openai_token_parameter': 'max_tokens',
-    'max_tool_rounds': 8,
     'max_context_chars': 100000,
     'default_project_path': r'D:\project\mate\FMEMateService',
 }
@@ -122,8 +121,7 @@ class ModelConfig:
             raise invalid('stream 必须是 true 或 false，不能加引号')
         if type(config['max_output_tokens']) is not int or config['max_output_tokens'] <= 0:
             raise invalid('max_output_tokens 必须是正整数，不能加引号；实际支持上限由模型接口决定')
-        for key, low, high in (('timeout_seconds', 5, 600),
-                               ('max_tool_rounds', 1, 20), ('max_context_chars', 20000, 500000)):
+        for key, low, high in (('timeout_seconds', 5, 600), ('max_context_chars', 20000, 500000)):
             if type(config[key]) is not int or not low <= config[key] <= high:
                 raise invalid(f'{key} 必须是 {low}–{high} 之间的整数，不能加引号')
 

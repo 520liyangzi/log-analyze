@@ -143,8 +143,7 @@ class ModelConfigTests(unittest.TestCase):
                 self.assert_private_error(field)
 
     def test_numeric_limits_and_strict_integer_types_are_preserved(self):
-        for field, low, high in (('timeout_seconds', 5, 600),
-                                 ('max_tool_rounds', 1, 20), ('max_context_chars', 20000, 500000)):
+        for field, low, high in (('timeout_seconds', 5, 600), ('max_context_chars', 20000, 500000)):
             for value in (str(low), float(low), True, None, low - 1, high + 1):
                 with self.subTest(field=field, value=value):
                     self.write(**{field: value})
@@ -152,6 +151,16 @@ class ModelConfigTests(unittest.TestCase):
             for value in (low, high):
                 self.write(**{field: value})
                 self.assertEqual(self.config.load()[field], value)
+
+    def test_defaults_omit_tool_round_limit_and_legacy_config_remains_readable(self):
+        self.assertNotIn('max_tool_rounds', DEFAULT_CONFIG)
+        self.assertNotIn('max_tool_rounds', self.config.load(False))
+        self.assertNotIn('max_tool_rounds', json.loads(self.config.path.read_text('utf-8')))
+        for value in (8, 1):
+            with self.subTest(legacy_max_tool_rounds=value):
+                self.write(max_tool_rounds=value)
+                self.assertEqual(self.config.load()['max_tool_rounds'], value)
+                self.assertTrue(self.config.public()['configured'])
 
     def test_output_token_budget_accepts_positive_integers_without_application_ceiling(self):
         self.write()

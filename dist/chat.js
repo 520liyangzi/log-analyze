@@ -3,6 +3,7 @@
   let selected=sessionStorage.getItem('logscope.chat.selected')||'', current=null, cursor=0, generation=0;
   let timer=null, busy=false, configured=false, project=null, projectDirty=false, pending=null;
   let sessions=[], listing=0, repositories=[], projectListing=0, projectGeneration=0, syncing=false, preparation=0, submitting=false;
+  let sessionLoading=false, sessionError='';
   const labels={search_logs:'搜索日志索引',log_context:'读取异常上下文',correlate_logs:'查询相邻 Pod 日志',verify_log:'核验原始日志',project_search:'搜索项目代码',project_read:'读取局部代码'};
   const states={running:'排查中',stopping:'正在停止',idle:'已保存',stopped:'已停止',failed:'可重试',interrupted:'已中断'};
   const running=()=>['running','stopping'].includes(current?.state);
@@ -35,21 +36,22 @@
     }).join('')).join('');
   }
   function controls(){
-    $('#chatSend').disabled=busy||syncing||running()||!configured;
-    $('#chatSend').textContent=syncing?'正在同步代码…':busy?'正在准备…':current?.state==='failed'?'继续排查 ↑':'发送并排查 ↑';
+    const restoring=Boolean(selected&&!current);
+    $('#chatSend').disabled=restoring||busy||syncing||running()||!configured;
+    $('#chatSend').textContent=restoring?(sessionLoading?'正在恢复会话…':'请先恢复会话'):syncing?'正在同步代码…':busy?'正在准备…':selected?'继续当前对话 ↑':'发送并排查 ↑';
     $('#chatStop').hidden=!running();$('#chatStop').disabled=current?.state==='stopping';
-    $('#chatDelete').disabled=!selected||running()||busy;$('#chatDownload').disabled=!selected;
+    $('#chatDelete').disabled=!selected||restoring||running()||busy;$('#chatDownload').disabled=!selected||restoring;
     $('#chatNew').disabled=busy&&!syncing;$('#chatActivity').hidden=!current;
     if(current){$('#chatActivity').textContent=current.status;$('#chatActivity').classList.toggle('working',running());}
     $('#chatProjectSummary').textContent=$('#chatUseCode').checked?(syncing?'正在同步代码…':project?'已同步 · '+$('#chatBranch').value:current?.task.project&&!projectDirty?'固定版本 · '+current.task.project.branch:'待同步 · Git 仓库'):'未启用 · 仅分析日志';
     $('#chatProjectFields').hidden=!$('#chatUseCode').checked;
-    $('#chatSyncProject').disabled=syncing||busy||running()||!remoteUrl();
-    $('#chatBranch').disabled=!project||syncing||busy||running();
-    $('#chatRemoteUrl').disabled=submitting;$('#chatRepository').disabled=submitting;$('#chatUseCode').disabled=submitting;
+    $('#chatSyncProject').disabled=restoring||syncing||busy||running()||!remoteUrl();
+    $('#chatBranch').disabled=restoring||!project||syncing||busy||running();
+    $('#chatRemoteUrl').disabled=submitting||restoring;$('#chatRepository').disabled=submitting||restoring;$('#chatUseCode').disabled=submitting||restoring;
     $('#chatProjectNote').dataset.working=String(syncing);
     const useCode=$('#chatUseCode').checked, fixedProject=current?.task.project&&!projectDirty;
     const projectState=useCode?(syncing?'正在同步…':project||fixedProject?$('#chatBranch').value:'待选择仓库'):'未关联';
-    $('#chatOpenProject').disabled=busy||submitting;
+    $('#chatOpenProject').disabled=restoring||busy||submitting;
     $('#chatOpenProject').classList.toggle('is-linked',Boolean(useCode&&(project||fixedProject)));
     $('#chatOpenProject').setAttribute('aria-expanded',String($('#chatProjectOptions').open));
     $('#chatOpenProject').title=useCode?'项目代码 · '+projectState:'关联 Git 仓库，让 AI 结合项目代码定位问题';
@@ -93,6 +95,7 @@
   }
   async function poll(serial){
     clearTimeout(timer);if(!selected||serial!==generation)return;
+    if(!current){await selectSession(selected);return;}
     try{
       const result=await api('/api/chat/session?id='+encodeURIComponent(selected)+'&after='+cursor);
       if(serial!==generation)return;
@@ -104,19 +107,31 @@
   async function selectSession(id){
     if(busy&&!syncing)return;remember();clearTimeout(timer);resetProject(false);const serial=++generation;
     selected=id;sessionStorage.setItem('logscope.chat.selected',id);cursor=0;current=null;project=null;projectDirty=false;
-    $('#chatQuestion').value=storage(draftKey())||'';$('#chatMessages').innerHTML='';
+    sessionLoading=true;sessionError='';
+    $('#chatQuestion').value=storage(draftKey())||'';
+    $('#chatUseCode').checked=false;$('#chatRemoteUrl').value='';renderRepositories();
+    $('#chatTitle').textContent='正在恢复当前会话';$('#chatScope').textContent='会话已选中，正在读取历史与固定代码版本';
+    $('#chatMessages').innerHTML='<div class="chat-list-empty" role="status">正在恢复会话历史…</div>';controls();renderSessions();
     try{
       const result=await api('/api/chat/session?id='+encodeURIComponent(id));if(serial!==generation)return;
+      sessionLoading=false;sessionError='';$('#chatMessages').innerHTML='';
+      if(!sessions.some(session=>session.id===id))sessions.unshift(result.session);
       cursor=result.cursor;applySession(result.session);renderEvents(result.events);
       const p=current.task.project;$('#chatUseCode').checked=Boolean(p);
       $('#chatRemoteUrl').value=p?(p.remote_url||''):(storage('logscope.chat.remote_url')||'');
       if(p){$('#chatBranch').innerHTML=`<option value="${escapeHTML(p.branch)}">${escapeHTML(p.branch)}</option>`;$('#chatProjectNote').textContent=`固定代码版本 ${p.commit}，继续对话将沿用此版本。`+(p.remote_url?'如需更新，请更新代码并重新预览。':'此历史会话未记录 Git 地址，可填写 Git 仓库地址后更新。');}
       renderRepositories();
       controls();renderSessions();timer=setTimeout(()=>poll(serial),650);
-    }catch(e){if(serial===generation){toast(e.message);newSession();}}
+    }catch(e){if(serial===generation){
+      sessionLoading=false;sessionError=e.message;
+      $('#chatTitle').textContent='当前会话待恢复';$('#chatScope').textContent='会话与草稿已保留；恢复历史后可继续追问';
+      $('#chatMessages').innerHTML=`<div class="chat-list-empty" role="status"><p>暂时无法加载当前会话：${escapeHTML(sessionError)}</p><p>不会新建对话；请重试恢复历史。</p><button type="button" id="chatRetrySession" class="quiet">重新加载会话</button></div>`;
+      controls();renderSessions();
+    }}
   }
   function newSession(){
     if(busy&&!syncing)return;remember();clearTimeout(timer);resetProject(false);generation++;selected='';current=null;project=null;cursor=0;projectDirty=false;
+    sessionLoading=false;sessionError='';
     sessionStorage.removeItem('logscope.chat.selected');$('#chatTitle').textContent='新建排查';$('#chatScope').textContent='使用左侧当前日志包';
     $('#chatQuestion').value=storage(draftKey())||'';$('#chatUseCode').checked=false;$('#chatRemoteUrl').value=storage('logscope.chat.remote_url')||'';renderRepositories();
     welcome();controls();renderSessions();$('#chatQuestion').focus();
@@ -155,7 +170,7 @@
     finally{if(valid()){syncing=false;controls();}}
   }
   async function prepare(){
-    if(busy||syncing||running())return;if(!$('#chatQuestion').value.trim())return toast('请先输入问题');if(!selected&&!needDataset())return;
+    if(busy||syncing||running()||(selected&&!current))return;if(!$('#chatQuestion').value.trim())return toast('请先输入问题');if(!selected&&!needDataset())return;
     const serial=++preparation,session=selected,question=$('#chatQuestion').value,dataset=state.dataset;
     const checkCurrent=()=>{if(serial!==preparation||session!==selected)throw cancelled();};
     busy=true;controls();
@@ -168,7 +183,12 @@
       checkCurrent();pending=result;
       pending.request_id=globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);
       pending.draft_text=question;
-      if($('#chatPreviewEnabled').checked){$('#chatPreviewText').textContent=pending.text;$('#chatPreviewDialog').showModal();}
+      if($('#chatPreviewEnabled').checked){
+        $('#chatPreviewTitle').textContent=session?'继续当前对话 · 确认本轮追问':'确认本次排查范围';
+        $('#chatPreviewNote').textContent=session?'本轮会携带当前会话的历史继续分析；超出上下文预算时保留近期内容。下方展示本轮任务范围，历史不会在此重复展开。':'仅预览，不会调用模型。确认后将保存对话并开始排查，完成后可在同一会话继续追问。';
+        $('#chatConfirm').textContent=session?'确认并继续':'确认并开始';
+        $('#chatPreviewText').textContent=pending.text;$('#chatPreviewDialog').showModal();
+      }
       else await submit();
     }catch(e){if(!e.cancelled)toast(e.message);}
     finally{if(serial===preparation){busy=false;controls();}}
@@ -179,8 +199,12 @@
     try{
       const result=await api('/api/chat/send',{preview_id:request.preview_id,request_id:request.request_id});
       if($('#chatQuestion').value===request.draft_text){$('#chatQuestion').value='';remember();}
+      // A successful send owns this session even if refreshing the sidebar fails.
+      selected=result.id;sessionStorage.setItem('logscope.chat.selected',selected);remember();
       $('#chatPreviewDialog').close();pending=null;
-      busy=false;submitting=false;await refreshList();await selectSession(result.id);
+      busy=false;submitting=false;
+      void refreshList().catch(e=>toast('对话已保存，列表刷新暂时失败：'+e.message));
+      await selectSession(result.id);
     }catch(e){toast(e.message);}
     finally{submitting=false;busy=false;$('#chatConfirm').disabled=false;controls();}
   }
@@ -216,6 +240,7 @@
     try{const result=await api('/api/chat/report?id='+selected);if(!result.text)return toast('本会话尚未生成完整报告');const url=URL.createObjectURL(new Blob([result.text],{type:'text/markdown;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='logscope-report.md';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){toast(e.message);}
   });
   document.addEventListener('click',async event=>{
+    if(event.target.closest('#chatRetrySession')){if(selected)await selectSession(selected);return;}
     const session=event.target.closest('[data-chat-session]');if(session){await selectSession(session.dataset.chatSession);return;}
     const example=event.target.closest('[data-chat-example]');if(example){$('#chatQuestion').value=example.dataset.chatExample;remember();$('#chatQuestion').focus();}
     const evidence=event.target.closest('[data-chat-log]');if(evidence){try{await openContext(await api('/api/record?id='+evidence.dataset.chatLog+'&dataset='+encodeURIComponent(evidence.dataset.chatDataset)));}catch(e){toast(e.message);}}
@@ -224,6 +249,11 @@
   document.addEventListener('logscope:view',async event=>{
     if(event.detail!=='chat'){clearTimeout(timer);generation++;if(syncing){resetProject();controls();}return;}
     void refreshProjects().catch(e=>toast('仓库列表暂不可用：'+e.message));
-    try{await capability();await refreshList();if(!loaded){loaded=true;if(selected&&sessions.some(s=>s.id===selected))await selectSession(selected);else newSession();}else if(selected)await poll(++generation);}catch(e){toast(e.message);}
+    try{
+      await capability();
+      await refreshList().catch(e=>toast('会话列表暂不可用：'+e.message));
+      if(!loaded){loaded=true;if(selected)await selectSession(selected);else newSession();}
+      else if(selected)await poll(++generation);
+    }catch(e){toast(e.message);}
   });
 })();
