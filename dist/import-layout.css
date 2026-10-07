@@ -10,6 +10,7 @@
 .import-review-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:100%}
 .import-review-task .import-cancel-button{color:#af3c50;border:1px solid #e9bec8;background:#fff4f6;font-weight:600}
 .import-review-task .import-cancel-button:hover:not(:disabled){color:#98293e;border-color:#cd8092;background:#ffe9ee}
+.import-review-task .import-cancel-button:disabled,.layout-footer #layoutDiscard:disabled{display:inline-block}
 .import-review-task button:disabled{cursor:not-allowed;opacity:.6}
 .import-cancel-error{margin:5px 0 0;color:#a53d50;font-size:.75rem;line-height:1.7;overflow-wrap:anywhere}
 .import-review-task strong{display:block;font-size:.85rem;font-weight:600;overflow-wrap:anywhere;line-height:1.6}

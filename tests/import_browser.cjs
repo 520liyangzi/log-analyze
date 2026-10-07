@@ -87,6 +87,8 @@ async function cancelPendingImportRegression(page, retainedId, dialogs) {
   await page.setViewportSize({width:1440,height:1120});
 
   let requests = 0;
+  let releaseRetry;
+  const retryRelease = new Promise(resolve => { releaseRetry = resolve; });
   const deleteRoute = async route => {
     const body = route.request().postDataJSON();
     if (body.dataset !== id) return route.continue();
@@ -95,6 +97,7 @@ async function cancelPendingImportRegression(page, retainedId, dialogs) {
     assert.equal(body.import_only, true, 'stale review pages must not delete an already completed import');
     if (requests === 1) return route.fulfill({status:503,contentType:'application/json',
       body:JSON.stringify({error:'取消服务暂不可用，请重试'})});
+    await retryRelease;
     return route.continue();
   };
   await page.route('**/api/datasets/delete', deleteRoute);
@@ -114,10 +117,14 @@ async function cancelPendingImportRegression(page, retainedId, dialogs) {
     await assertNotIndexed(page, id);
     assert(await page.evaluate(key => localStorage.getItem(key), draftKey), 'failed cancellation must preserve the local draft');
 
-    const [deleted] = await Promise.all([
-      page.waitForResponse(response => new URL(response.url()).pathname === '/api/datasets/delete' && response.status() === 202),
-      cancel.click(),
-    ]);
+    const deletionResponse = page.waitForResponse(response =>
+      new URL(response.url()).pathname === '/api/datasets/delete' && response.status() === 202);
+    await cancel.click();
+    assert.equal(await cancel.isVisible(), true, 'cancellation progress must remain visible while the request is pending');
+    assert.equal(await cancel.isDisabled(), true, 'pending cancellation must prevent duplicate requests');
+    assert.match(await cancel.innerText(), /正在取消/);
+    releaseRetry();
+    const deleted = await deletionResponse;
     assert.equal(deleted.status(), 202);
     await row.waitFor({state:'detached',timeout:15000});
     assert.equal(requests, 2, 'retry should send one new deletion request');
@@ -138,6 +145,7 @@ async function cancelPendingImportRegression(page, retainedId, dialogs) {
       'cancelling the pending ZIP must leave other indexed logs searchable');
   } finally {
     dialogs.accept = true;
+    releaseRetry();
     await page.unroute('**/api/datasets/delete', deleteRoute);
   }
 }

@@ -217,8 +217,8 @@
     $('#importLayoutMeta').textContent='正在读取 '+String(id);$('#layoutGroups').innerHTML='';$('#importLayoutWarnings').hidden=true;
     setMessage('正在读取目录扫描结果…');statusNote();updateButtons();renderPicker();
     if(!dialog.open)dialog.showModal();
-    try{const plan=await api('/api/imports/preview?dataset='+encodeURIComponent(id));if(token!==generation||!dialog.open)return;current.busy=false;adopt(plan,!reload);if(['scanning','importing'].includes(plan.state))schedulePreview();}
-    catch(error){if(token!==generation)return;current.busy=false;setMessage('读取失败：'+error.message+'。可以点击重新加载。','error');updateButtons();}
+    try{const plan=await api('/api/imports/preview?dataset='+encodeURIComponent(id));if(token!==generation||!dialog.open)return;current.busy=false;adopt(plan,!reload);renderQueue();if(['scanning','importing'].includes(plan.state))schedulePreview();}
+    catch(error){if(token!==generation)return;current.busy=false;setMessage('读取失败：'+error.message+'。可以点击重新加载。','error');updateButtons();renderQueue();}
   }
   async function submit(action) {
     if(!current||current.busy||current.conflict||!editableStates.has(current.plan?.state))return;
@@ -281,7 +281,7 @@
     if(cancel){if(!cancel.disabled)void cancelImport(cancel.dataset.importCancel);return;}
     if(task){if(!task.disabled)void open(task.dataset.importOpen);}else if(page){queuePage=Number(page.dataset.importQueuePage);renderQueue();}
   });
-  dialog.addEventListener('close',()=>{persistDraft();clearTimeout(pollTimer);generation++;});
+  dialog.addEventListener('close',()=>{persistDraft();clearTimeout(pollTimer);generation++;renderQueue();});
   window.addEventListener('beforeunload',persistDraft);
   document.addEventListener('logscope:datasets',renderQueue);
   window.LogScopeImports={open};renderQueue();
