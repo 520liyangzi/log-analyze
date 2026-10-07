@@ -22,6 +22,8 @@ def result(deferred=False, **values):
     return dict(deferred=deferred, cancelled=False, timed_out=False,
                 expired_count=values.get('expired_count', 1),
                 reclaimed_bytes=values.get('reclaimed_bytes', 1234),
+                deleted_archive_count=values.get('deleted_archive_count', 1),
+                deleted_archive_bytes=values.get('deleted_archive_bytes', 256),
                 compacted=not deferred, reason='使用中，稍后重试' if deferred else '',
                 expired_ids=['example'])
 
@@ -464,6 +466,8 @@ class RetentionScheduleTests(unittest.TestCase):
         self.assertEqual(self.manager.status()['last_result']['expired_ids'], ['example'])
         self.assertNotEqual(self.manager.status()['progress']['stage'], 'altered')
         self.assertEqual(len(self.store.calls), 1)
+        self.assertEqual(snapshot['last_result']['deleted_archive_count'], 1)
+        self.assertEqual(snapshot['last_result']['deleted_archive_bytes'], 256)
         self.assertEqual(snapshot['hours'], 72)
         self.assertEqual(snapshot['schedule'], '02:00')
         self.assertFalse(snapshot['maintenance'])

@@ -2,9 +2,11 @@
 (() => {
   let lastSignature = null, refreshing = false, refreshPending = true;
   let statusGeneration = 0, pollTimer, cancelPending = false, lastStatus = null;
+  const archiveDeletes = new Map(), archiveErrors = new Map();
+  let archiveDeleteTimer, archiveDeleteChecking = false;
   const status = $('#retentionStatus'), notice = $('#retentionNotice');
   const activePhases = new Set(['queued', 'running', 'cancelling']);
-  const stages = {checking:'检查过期日志', queued:'等待清理', deleting:'删除过期索引', checkpoint:'写回并释放 WAL', fts:'合并全文索引', vacuum:'压缩日志数据库', finishing:'完成维护', rollback:'回滚事务'};
+  const stages = {checking:'检查过期日志包', queued:'等待清理', deleting:'删除过期索引', archives:'删除过期 ZIP', checkpoint:'写回并释放 WAL', fts:'合并全文索引', vacuum:'压缩日志数据库', finishing:'完成维护', rollback:'回滚事务'};
 
   function displayTime(value) {
     if (!value) return '—';
@@ -20,14 +22,70 @@
   }
 
   function renderArchives() {
-    const archives = state.datasets.filter(dataset => dataset.state === 'expired');
+    const archives = state.datasets.filter(dataset => dataset.state === 'expired' && Number(dataset.archive_bytes) > 0);
+    // Keep a submitted deletion visible until a fresh response confirms its result.
+    for (const [id, deletion] of archiveDeletes) if (!archives.some(dataset => dataset.id === id)) archives.push(deletion.dataset);
     $('#retainedCount').textContent = number(archives.length);
     $('#retainedArchiveList').innerHTML = archives.length ? archives.map(dataset => {
       const path = dataset.archive_relative_path || `archives/${dataset.id}.zip`;
-      const hasArchive = Number(dataset.archive_bytes) > 0;
-      const archive = hasArchive ? `<code>${escapeHTML(path)}</code><a class="retained-download" href="/api/archives/download?dataset=${encodeURIComponent(dataset.id)}" download>⇩ 下载原始 ZIP</a>` : '<p class="retained-missing">原 ZIP 未留存，请使用原上传文件</p>';
-      return `<article class="retained-card"><div class="retained-card-heading"><strong>${escapeHTML(dataset.name)}</strong><span class="retained-badge">索引已清理</span></div><p>${hasArchive ? formatBytes(dataset.archive_bytes) + ' · ' : ''}清理时间 ${escapeHTML(displayTime(dataset.expired_at))}</p>${archive}</article>`;
-    }).join('') : '<div class="retained-empty"><strong>暂时没有过期归档</strong><p>索引满 72 小时后，在每日清理时移到这里；正在使用的日志包仍在左侧选择。</p></div>';
+      const deletion = archiveDeletes.get(dataset.id), error = archiveErrors.get(dataset.id), unknown = deletion?.phase === 'unknown';
+      const action = deletion ? unknown
+        ? `<button type="button" class="text-button retained-retry" data-retained-retry="${escapeHTML(dataset.id)}">刷新删除状态</button>`
+        : `<button type="button" class="retained-delete" data-retained-delete="${escapeHTML(dataset.id)}" disabled>正在删除…</button>`
+        : `<button type="button" class="retained-delete" data-retained-delete="${escapeHTML(dataset.id)}">${error ? '重试删除' : '删除 ZIP'}</button>`;
+      const message = unknown ? '暂时无法确认删除结果，请刷新状态；不会再次发起删除。' : error || '';
+      return `<article class="retained-card"><div class="retained-card-heading"><strong>${escapeHTML(dataset.name)}</strong><span class="retained-badge">${deletion ? unknown ? '状态待确认' : '删除中' : '索引已清理'}</span></div><p>${formatBytes(dataset.archive_bytes)} · 索引清理时间 ${escapeHTML(displayTime(dataset.expired_at))}</p><code>${escapeHTML(path)}</code><div class="retained-card-actions">${deletion ? '' : `<a class="retained-download" href="/api/archives/download?dataset=${encodeURIComponent(dataset.id)}" download>⇩ 下载原始 ZIP</a>`}${action}</div>${message ? `<p class="retained-error" role="status">${escapeHTML(message)}</p>` : ''}</article>`;
+    }).join('') : '<div class="retained-empty"><strong>没有遗留的过期 ZIP</strong><p>新清理规则会一并删除超过 72 小时的日志包和索引。正在使用的日志包仍在左侧选择。</p></div>';
+  }
+
+  function scheduleArchiveDeletes() {
+    clearTimeout(archiveDeleteTimer);
+    if ([...archiveDeletes.values()].some(item => item.phase === 'deleting')) archiveDeleteTimer = setTimeout(checkArchiveDeletes, 1000);
+  }
+
+  async function checkArchiveDeletes() {
+    if (archiveDeleteChecking) return;
+    archiveDeleteChecking = true;
+    let timeout;
+    try {
+      const datasets = await Promise.race([refreshDatasets(), new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('列表响应超时')), 10000); })]);
+      if (datasets) for (const [id, deletion] of archiveDeletes) {
+        if (deletion.phase === 'requesting') continue;
+        const row = datasets.find(dataset => dataset.id === id);
+        if (!row || (row.state !== 'deleting' && Number(row.archive_bytes) === 0)) {
+          archiveDeletes.delete(id); archiveErrors.delete(id); toast(`${deletion.dataset.name} 的原始 ZIP 已删除`);
+        } else if (row.state !== 'deleting') {
+          archiveDeletes.delete(id);
+          if (row.state === 'expired') archiveErrors.set(id, row.error || '删除未完成，请重试。');
+          else toast('日志包状态已变更，请刷新列表后检查；未继续删除。');
+        }
+      }
+    } catch {
+      // The regular dataset refresh still retries. Stop the spinner after a bound
+      // instead of suggesting an unconfirmed failure or resubmitting the delete.
+    } finally {
+      clearTimeout(timeout); archiveDeleteChecking = false;
+      for (const deletion of archiveDeletes.values()) if (deletion.phase === 'deleting' && Date.now() - deletion.started > 45000) deletion.phase = 'unknown';
+      renderArchives(); scheduleArchiveDeletes();
+    }
+  }
+
+  async function deleteArchive(id) {
+    if (archiveDeletes.has(id)) return;
+    const dataset = state.datasets.find(row => row.id === id && row.state === 'expired' && Number(row.archive_bytes) > 0);
+    if (!dataset || !confirm(`确定删除“${dataset.name}”的原始 ZIP？该包索引已过期，删除后无法从本机重新导入；其他日志包、AI 会话及代码仓不受影响。`)) return;
+    const deletion = {dataset, phase:'requesting', started:Date.now()};
+    archiveErrors.delete(id); archiveDeletes.set(id, deletion); renderArchives();
+    let timeout;
+    try {
+      await Promise.race([api('/api/datasets/delete', {dataset:id, compact:false}), new Promise((_, reject) => { timeout = setTimeout(() => reject(Object.assign(new Error('删除请求结果暂未确认'), {unknown:true})), 15000); })]);
+      deletion.phase = 'deleting'; deletion.started = Date.now();
+      void checkArchiveDeletes();
+    } catch (error) {
+      if (error.unknown || !error.status) deletion.phase = 'unknown';
+      else { archiveDeletes.delete(id); archiveErrors.set(id, error.message || '删除请求失败，请重试。'); }
+      renderArchives();
+    } finally { clearTimeout(timeout); }
   }
 
   async function refreshArchiveData() {
@@ -60,10 +118,10 @@
     status.title = `服务电脑时区：${result.timezone || '本地时区'}。${result.message || ''}`;
     notice.hidden = !active && !state.retentionBusy && !['deferred', 'error', 'cancelled'].includes(result.phase);
     notice.classList.toggle('is-busy', state.retentionBusy);
-    $('#retentionTitle').textContent = stopping && (active || state.retentionBusy) ? '正在安全停止' : active ? '过期索引清理进度' : result.phase === 'cancelled' ? '本次清理已停止' : result.phase === 'error' ? '本次清理未完成' : '过期索引清理已延期';
+    $('#retentionTitle').textContent = stopping && (active || state.retentionBusy) ? '正在安全停止' : active ? '过期日志包及索引清理进度' : result.phase === 'cancelled' ? '本次清理已停止' : result.phase === 'error' ? '本次清理未完成' : '过期日志包及索引清理已延期';
     $('#retentionMessage').textContent = active || state.retentionBusy
-      ? `${reason || '正在准备清理'}。${state.retentionBusy ? '数据库暂被维护占用，请稍后查询。' : '当前未占用日志查询，可继续搜索。'}${stopping ? '正在等待 SQL 中断或事务回滚，停止完成以实时状态为准。' : ''}原 ZIP、AI 会话及配置保留。`
-      : `${reason || '本轮任务已结束'}。${nextRun}。原 ZIP 保留。`;
+      ? `${reason || '正在准备清理'}。${state.retentionBusy ? '数据库暂被维护占用，请稍后查询。' : '当前未占用日志查询，可继续搜索。'}${stopping ? '正在等待 SQL 中断或事务回滚，停止完成以实时状态为准。' : ''}过期 ZIP 和索引一并清理；AI 会话、配置及代码仓保留。`
+      : `${reason || '本轮任务已结束'}。${nextRun}。过期 ZIP 和索引一并清理；AI 会话、配置及代码仓保留。`;
     $('#retentionProgress').hidden = !active && !state.retentionBusy;
     if (active || state.retentionBusy) {
       const counts = Number.isFinite(Number(progress.total)) && Number(progress.total) > 0
@@ -144,6 +202,12 @@
     void refreshArchiveData();
   });
   $('#retainedUpload').addEventListener('click', () => { $('#retainedDialog').close(); openUpload(); });
+  $('#retainedArchiveList').addEventListener('click', event => {
+    const remove = event.target.closest('[data-retained-delete]');
+    if (remove && !remove.disabled) { void deleteArchive(remove.dataset.retainedDelete); return; }
+    const retry = event.target.closest('[data-retained-retry]');
+    if (retry) { const deletion = archiveDeletes.get(retry.dataset.retainedRetry); if (deletion) { deletion.phase = 'deleting'; deletion.started = Date.now(); renderArchives(); void checkArchiveDeletes(); } }
+  });
   document.addEventListener('logscope:datasets', () => { renderArchives(); refreshPending = false; $('#retainedRefreshStatus').textContent = ''; });
   renderArchives();
   void poll();

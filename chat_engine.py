@@ -73,7 +73,7 @@ class ChatManager:
         self.store = store
         self.config = ModelConfig(store.directory)
         self.rules = AnalysisRules(store.directory)
-        self.projects = ChatProjects()
+        self.projects = ChatProjects(store.directory)
         self.path = store.directory / 'chat.sqlite3'
         self.directory = store.directory / 'chat-sessions'
         self.directory.mkdir(exist_ok=True)

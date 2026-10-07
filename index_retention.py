@@ -1,7 +1,8 @@
-"""Index-only expiry. Original archives and investigation data are never removed."""
+"""Expire managed log archives and indexes while preserving investigation data."""
 import datetime as dt
 import contextlib
 from functools import wraps
+import re
 import shutil
 import sqlite3
 import threading
@@ -127,21 +128,35 @@ def expired_at(value, cutoff):
         return False
 
 
-def candidates(db, cutoff):
-    # A terminated import may have committed batches before startup marked it
-    # failed. Those abandoned index rows must not live forever either.
-    rows = db.execute("""SELECT id,name,completed_at,created,index_version,state FROM datasets d
-        WHERE state='ready' OR (state='failed' AND
-          (EXISTS(SELECT 1 FROM logs WHERE dataset=d.id) OR EXISTS(SELECT 1 FROM files WHERE dataset=d.id)))""").fetchall()
+def archive_artifacts(store, identifier):
+    # Only application-owned files, never arbitrary collector output or project
+    # directories. Legacy non-UUID fixture/metadata IDs may still have SQL rows.
+    if not re.fullmatch(r'[a-f0-9]{32}', identifier):
+        return ()
+    return (store.directory / 'archives' / (identifier + '.zip'),
+            store.directory / 'import-plans' / (identifier + '.json'))
+
+
+def candidates(store, db, cutoff):
+    # Include old index-only tombstones and abandoned review/failed uploads.
+    # Once artifacts are gone, an expired tombstone must not trigger nightly
+    # DELETE/VACUUM work again. Keep it to explain old AI evidence references.
+    rows = db.execute("""SELECT id,name,completed_at,created,index_version,state,
+        (EXISTS(SELECT 1 FROM logs WHERE dataset=d.id) OR
+         EXISTS(SELECT 1 FROM files WHERE dataset=d.id)) AS has_rows FROM datasets d
+        WHERE state IN ('ready','failed','review','expired')""").fetchall()
     return [row for row in rows if expired_at(
-        (row['completed_at'] if row['state'] == 'ready' else None) or row['created'], cutoff)]
+        (row['completed_at'] if row['state'] in ('ready', 'expired') else None) or row['created'], cutoff)
+        and (row['state'] != 'expired' or row['has_rows'] or
+             any(path.exists() for path in archive_artifacts(store, row['id'])))]
 
 
 def expire_indexes(store, cutoff, busy=lambda: False, control=None):
     owned_control = control is None
     control = control or MaintenanceControl()
     result = dict(deferred=False, expired_count=0, expired_ids=[], reclaimed_bytes=0,
-                  compacted=False, cancelled=False, timed_out=False, reason='没有过期索引需要清理')
+                  deleted_archive_count=0, deleted_archive_bytes=0,
+                  compacted=False, cancelled=False, timed_out=False, reason='没有过期日志包或索引需要清理')
     reserved, before = False, None
 
     def defer(reason):
@@ -158,7 +173,7 @@ def expire_indexes(store, cutoff, busy=lambda: False, control=None):
                     return defer('有日志查询或导入正在进行，本轮暂缓')
             with maintenance_connection(store, control) as db:
                 pending = db.execute("SELECT value FROM log_metadata WHERE key='compaction_pending'").fetchone()
-                expired = candidates(db, cutoff)
+                expired = candidates(store, db, cutoff)
                 needs_work = expired or db.execute('PRAGMA freelist_count').fetchone()[0] or (pending and pending[0] == '1')
             if not needs_work:
                 return result
@@ -181,13 +196,31 @@ def expire_indexes(store, cutoff, busy=lambda: False, control=None):
                     db.execute(f'DELETE FROM {table} WHERE rowid IN (SELECT id FROM logs WHERE dataset=?)', (identifier,))
                 db.execute('DELETE FROM logs WHERE dataset=?', (identifier,))
                 db.execute('DELETE FROM files WHERE dataset=?', (identifier,))
-                db.execute("UPDATE datasets SET state='expired',expired_at=?,error='' WHERE id=?",
-                           (dt.datetime.now(dt.timezone.utc).isoformat(), identifier))
-                db.execute("INSERT OR REPLACE INTO log_metadata VALUES ('compaction_pending','1')")
+                if row['state'] != 'expired':
+                    db.execute("""UPDATE datasets SET state='expired',expired_at=?,error='',
+                               completed_at=CASE WHEN state IN ('failed','review') THEN NULL ELSE completed_at END
+                               WHERE id=?""",
+                               (dt.datetime.now(dt.timezone.utc).isoformat(), identifier))
+                if row['has_rows']:
+                    db.execute("INSERT OR REPLACE INTO log_metadata VALUES ('compaction_pending','1')")
                 # Expiry state and index deletion commit atomically. A crash
                 # during the later VACUUM never restores this package to ready.
                 control.checkpoint()
                 db.commit()
+                # Unlink only after the SQL transaction is durable. A failed or
+                # interrupted unlink leaves an expired row with its artifact,
+                # so the next scheduled run retries without restoring indexes.
+                control.publish('archives', '正在删除过期原始 ZIP 和目录方案', current=row['name'])
+                for artifact in archive_artifacts(store, identifier):
+                    control.checkpoint()
+                    try:
+                        size = artifact.lstat().st_size
+                        artifact.unlink()
+                    except FileNotFoundError:
+                        continue
+                    if artifact.suffix == '.zip':
+                        result['deleted_archive_count'] += 1
+                        result['deleted_archive_bytes'] += size
                 result['expired_ids'].append(identifier)
                 result['expired_count'] += 1
                 store.progress.pop(identifier, None)
@@ -220,7 +253,7 @@ def expire_indexes(store, cutoff, busy=lambda: False, control=None):
                 db.execute("INSERT OR REPLACE INTO log_metadata VALUES ('compaction_pending','0')")
                 result['compacted'] = True
             if result['expired_count'] or result['compacted']:
-                result['reason'] = '过期日志索引已清理并整理数据库；原始 ZIP、AI 对话和配置均保留'
+                result['reason'] = '过期日志包、索引及目录方案已清理；AI 对话、配置和代码仓保留'
             control.publish('finishing', '正在完成维护并恢复日志查询', current='')
     except (MaintenanceStopped, sqlite3.Error, OSError):
         if control.reason:
@@ -228,11 +261,11 @@ def expire_indexes(store, cutoff, busy=lambda: False, control=None):
                           reason='清理已超时停止，日志查询已恢复；已完成的清理保留，未完成的事务已回滚' if control.reason == 'timeout'
                           else '清理已取消，日志查询已恢复；已完成的清理保留，未完成的事务已回滚')
         else:
-            result.update(deferred=True, reason='索引清理或数据库整理未完成，已恢复日志查询；ZIP 保留不变')
+            result.update(deferred=True, reason='日志包清理或数据库整理未完成，已恢复查询；剩余过期 ZIP 将在下次清理重试')
     finally:
         try:
             if before is not None:
-                result['reclaimed_bytes'] = max(0, before - database_bytes(store))
+                result['reclaimed_bytes'] = max(0, before - database_bytes(store)) + result['deleted_archive_bytes']
         except OSError:
             pass  # Reporting failures must never leave maintenance locked.
         finally:

@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -95,6 +96,64 @@ class DeleteDatasetTests(unittest.TestCase):
                 self.assertFalse(any(row['id']=='stale' for row in reopened.datasets()))
             finally:
                 reopened.pool.shutdown(wait=True)
+
+    def test_api_deletes_retained_expired_zip_and_plan_without_touching_other_data(self):
+        with tempfile.TemporaryDirectory(prefix='logscope retained zip ') as temp:
+            with mock.patch('app.RetentionManager.start'):
+                server = make_server(Path(temp) / 'data', 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = 'http://127.0.0.1:' + str(server.server_address[1])
+            try:
+                expired = server.store.submit(create_demo(Path(temp) / 'retained.zip'), 'retained.zip')
+                current = server.store.submit(create_demo(Path(temp) / 'current.zip'), 'current.zip')
+                self.wait_ready(server, [expired, current])
+                archive = server.store.directory / 'archives' / (expired + '.zip')
+                plan = server.store.directory / 'import-plans' / (expired + '.json')
+                plan.parent.mkdir(parents=True, exist_ok=True)
+                plan.write_text('{"synthetic":true}', 'utf-8')
+                # Reproduce a pre-upgrade index-only expiry with its saved ZIP.
+                with server.store.connect() as db:
+                    table = server.store.fts_table(db.execute('SELECT index_version FROM datasets WHERE id=?', (expired,)).fetchone()[0])
+                    if table:
+                        db.execute(f'DELETE FROM {table} WHERE rowid IN (SELECT id FROM logs WHERE dataset=?)', (expired,))
+                    db.execute('DELETE FROM logs WHERE dataset=?', (expired,))
+                    db.execute('DELETE FROM files WHERE dataset=?', (expired,))
+                    db.execute("UPDATE datasets SET state='expired',expired_at='2026-09-16T02:00:00+08:00' WHERE id=?", (expired,))
+                preserved = {
+                    server.store.directory / 'projects' / 'repository' / '.git' / 'HEAD': b'ref: refs/heads/main\n',
+                    server.store.directory / 'chat-sessions' / 'history' / 'report.md': b'synthetic saved report',
+                    server.store.directory / 'archives' / (current + '.zip'): (server.store.directory / 'archives' / (current + '.zip')).read_bytes(),
+                }
+                for path, content in preserved.items():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(content)
+                _, listing = self.api(base, '/api/datasets')
+                listed = next(row for row in listing if row['id'] == expired)
+                self.assertEqual(listed['state'], 'expired')
+                self.assertGreater(listed['archive_bytes'], 0)
+                status, _ = self.api(base, '/api/datasets/delete', {'dataset': expired})
+                self.assertEqual(status, 202)
+                server.store.pool.submit(lambda: None).result(timeout=20)
+                self.assertFalse(archive.exists())
+                self.assertFalse(plan.exists())
+                _, listing = self.api(base, '/api/datasets')
+                self.assertFalse(any(row['id'] == expired for row in listing))
+                self.assertTrue(any(row['id'] == current for row in listing))
+                self.assertGreater(server.store.search({'dataset': current})['summary']['total'], 0)
+                for path, content in preserved.items():
+                    self.assertEqual(path.read_bytes(), content)
+                with self.assertRaises(HTTPError) as removed:
+                    self.api(base, '/api/archives/download?dataset=' + expired)
+                with removed.exception as response:
+                    self.assertEqual(response.code, 400)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=10)
+                server.store.pool.shutdown(wait=True)
+                server.chats.pool.shutdown(wait=True)
+                server.chats.projects.pool.shutdown(wait=True)
 
     def test_explicit_compaction_delete_still_supported(self):
         with tempfile.TemporaryDirectory() as temp:

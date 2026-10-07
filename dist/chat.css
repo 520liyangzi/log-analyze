@@ -60,9 +60,10 @@
 .chat-compose { padding:16px 25px 20px; }
 #chatProjectOptions { padding:0 0 13px; }#chatProjectOptions summary { display:flex; align-items:center; justify-content:space-between; color:#4d668a; font-size:.77rem; cursor:pointer; padding:5px 0; }#chatProjectOptions summary span:last-child { color:#8d9db5; font-size:.7rem; }
 #chatProjectOptions>.checkbox { margin:12px 0; font-size:.78rem; }
-.chat-project-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }.chat-project-grid label { font-size:.73rem; }.chat-project-grid input { font-size:.76rem; }
-.chat-branch-row { display:flex; gap:10px; margin-top:12px; align-items:center; }.chat-branch-row select { flex:1; }.chat-branch-row button { font-size:.73rem; }
-#chatProjectNote { margin:10px 0 0; font-size:.7rem; color:#8c9db4; }
+.chat-project-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; margin-top:12px; }.chat-project-grid label,.chat-repository-row label,.chat-branch-row label { font-size:.73rem; min-width:0; }.chat-project-grid input,.chat-repository-row select,.chat-branch-row select { font-size:.76rem; width:100%; min-width:0; }
+.chat-repository-row,.chat-branch-row { display:flex; gap:10px; align-items:end; }.chat-repository-row label,.chat-branch-row label { flex:1; }.chat-branch-row { margin-top:12px; }.chat-repository-row button,.chat-branch-row button { font-size:.73rem; flex-shrink:0; min-height:40px; }
+#chatProjectNote,#chatProjectStorage { margin:10px 0 0; font-size:.7rem; color:#8c9db4; overflow-wrap:anywhere; line-height:1.6; }#chatProjectStorage { color:#71839d; }#chatProjectNote[data-working="true"] { color:#4587da; }
+@media(max-width:600px){.chat-branch-row{align-items:stretch;flex-direction:column-reverse}.chat-branch-row button{align-self:flex-start}.chat-repository-row{gap:7px}.chat-repository-row button{padding-inline:9px}#chatProjectOptions summary{gap:12px}#chatProjectSummary{text-align:right}}
 #chatQuestion { border-color:#c9d7ec; padding:13px 15px; line-height:1.8; background:#fcfdff; border-radius:9px; }
 .chat-compose-footer { display:flex; align-items:center; gap:12px; margin-top:12px; }.chat-compose-footer .checkbox { font-size:.72rem; }.chat-compose-footer>span { font-size:.65rem; color:#9ba8bc; margin-right:auto; }.chat-compose-footer button { font-size:.8rem; }
 .chat-compose>small { display:block; margin-top:12px; font-size:.65rem; color:#97a5b8; }

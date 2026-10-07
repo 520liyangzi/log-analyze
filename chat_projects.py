@@ -1,14 +1,19 @@
 """Explicit Git synchronization and bounded, immutable code queries."""
 import concurrent.futures
+import datetime as dt
+import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
+from urllib.parse import urlsplit
 import uuid
 
-from project_access import inspect_repository, select_revision
+from analysis_rules import atomic_json
 
 
 def run_git(root, *args, limit=160000, timeout=60, allow_nomatch=False):
@@ -16,11 +21,28 @@ def run_git(root, *args, limit=160000, timeout=60, allow_nomatch=False):
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as error:
         try:
             result = subprocess.run(['git', '--no-pager', '-C', str(root), *args], stdout=output,
-                                    stderr=error, env=env, timeout=timeout, check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            raise ValueError('Git 操作失败或超时，请在服务电脑上检查 Git、网络和仓库凭据。') from None
+                                    stderr=error, stdin=subprocess.DEVNULL, env=env, timeout=timeout, check=False)
+        except FileNotFoundError:
+            raise ValueError('服务电脑没有找到 git 命令，请安装 Git 并确认 PATH 配置') from None
+        except subprocess.TimeoutExpired:
+            raise ValueError('Git 操作超时，请检查服务电脑的网络、VPN 和仓库登录状态后重试') from None
+        except OSError:
+            raise ValueError('无法启动 Git，请检查服务电脑的 Git 安装与目录权限') from None
         if result.returncode and not (allow_nomatch and result.returncode == 1):
-            raise ValueError('Git 操作失败，请在服务电脑检查远程地址、分支和凭据；未改动工作区。')
+            error.seek(0)
+            detail = error.read(32000).decode('utf-8', errors='replace').lower()
+            if any(token in detail for token in ('authentication failed', 'could not read username',
+                                                  'permission denied', 'repository not found',
+                                                  'could not read from remote repository')):
+                message = 'Git 远程仓库不可访问，请检查拉取链接及服务电脑上的 Git 登录和仓库权限'
+            elif any(token in detail for token in ('could not resolve', 'failed to connect', 'connection refused',
+                                                    'connection timed out', 'network is unreachable')):
+                message = '无法连接 Git 远程仓库，请检查服务电脑的 DNS、网络、VPN 和代理配置'
+            elif 'certificate' in detail or 'ssl' in detail:
+                message = 'Git TLS 校验失败，请检查服务电脑信任的证书和仓库 HTTPS 配置'
+            else:
+                message = 'Git 操作失败，请检查远程仓库、分支和目录权限'
+            raise ValueError(message + '；原始 Git 输出不回显')
         output.seek(0)
         raw = output.read(limit + 1)
         return raw[:limit].decode('utf-8', errors='replace'), len(raw) > limit
@@ -38,48 +60,171 @@ def relative_path(value, empty=False):
     return value
 
 
+def git_remote(value):
+    """Validate transport URLs before hashing, persisting, or displaying them."""
+    if not isinstance(value, str):
+        raise ValueError('请填写 HTTP(S)、SSH 或 SCP 格式的 Git 拉取链接')
+    remote = value.strip().rstrip('/')
+    if (not remote or len(remote) > 2000 or remote.startswith('-')
+            or any(char.isspace() or not char.isprintable() for char in remote)
+            or '\\' in remote or re.match(r'^[A-Za-z]:', remote)):
+        raise ValueError('请填写有效的 Git 拉取链接，不支持本地路径或命令参数')
+    if '?' in remote or '#' in remote:
+        raise ValueError('Git 拉取链接不能包含查询参数或片段；请使用服务电脑上的 Git 凭据管理')
+    if '://' in remote:
+        try:
+            parsed = urlsplit(remote)
+            port = parsed.port
+        except ValueError:
+            raise ValueError('Git 拉取链接的主机或端口格式无效') from None
+        if parsed.scheme not in ('http', 'https', 'ssh') or not parsed.hostname or parsed.hostname.startswith('-'):
+            raise ValueError('Git 拉取链接仅支持 HTTP(S)、SSH 或 SCP 格式')
+        try:
+            hostname = parsed.hostname.encode('idna').decode('ascii')
+        except UnicodeError:
+            raise ValueError('Git 拉取链接的主机名格式无效') from None
+        if not re.fullmatch(r'[A-Za-z0-9_.:-]+', hostname):
+            raise ValueError('Git 拉取链接的主机名格式无效')
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError('Git 拉取链接的端口必须在 1–65535 之间')
+        if parsed.password is not None or (parsed.scheme in ('http', 'https') and parsed.username is not None):
+            raise ValueError('Git 拉取链接不能内嵌用户名密码或 token；请使用服务电脑上的 Git 凭据管理')
+        if parsed.username is not None and not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', parsed.username):
+            raise ValueError('SSH 用户名格式无效；拉取链接中不能包含密码或 token')
+        path = parsed.path
+    else:
+        match = re.fullmatch(r'(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?'
+                             r'(?:[A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9A-Fa-f:]+\]):(.+)', remote)
+        if not match:
+            raise ValueError('请填写 HTTP(S)、SSH 或 SCP 格式的 Git 拉取链接，不支持本地路径')
+        path = match.group(1)
+    if not path or path == '/' or path.startswith(('-', ':')):
+        raise ValueError('Git 拉取链接必须包含仓库路径')
+    name = path.rsplit('/', 1)[-1]
+    if name.lower().endswith('.git'):
+        name = name[:-4]
+    name = re.sub(r'[^A-Za-z0-9._-]+', '-', name).strip('._-')[:64] or 'repository'
+    identifier = name + '-' + hashlib.sha256(remote.encode('utf-8')).hexdigest()[:12]
+    return remote, name, identifier
+
+
 class ChatProjects:
-    def __init__(self):
+    def __init__(self, data_directory):
+        self.storage = (Path(data_directory).resolve() / 'projects').resolve()
+        self.storage.mkdir(parents=True, exist_ok=True)
+        self.registry_path = self.storage / 'repositories.json'
         self.lock = threading.RLock()
         self.repo_locks = {}
         self.jobs = {}
+        self.latest_jobs = {}
+        self.registry = {}
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        try:
+            saved = json.loads(self.registry_path.read_text('utf-8'))
+            for entry in saved.get('repositories', []):
+                remote, name, identifier = git_remote(entry.get('remote_url'))
+                root = self.storage / identifier
+                if entry.get('id') == identifier and entry.get('root') == str(root):
+                    self.registry[identifier] = dict(id=identifier, name=name, remote_url=remote,
+                                                     root=str(root), updated_at=str(entry.get('updated_at', '')))
+        except (OSError, ValueError, TypeError, AttributeError):
+            # A missing/broken index never authorizes a different local path.
+            # Explicitly syncing a known URL can rediscover its managed clone.
+            self.registry = {}
+
+    def repositories(self):
+        with self.lock:
+            entries = [dict(entry) for entry in self.registry.values()]
+        return dict(storage_path=str(self.storage),
+                    repositories=sorted(entries, key=lambda entry: entry['updated_at'], reverse=True))
 
     def sync(self, body):
-        path = str(body.get('path', '')).strip()
-        if not path or not Path(path).is_absolute() or '\x00' in path or len(path) > 4096:
-            raise ValueError('请填写服务电脑上的 Git 项目绝对路径')
-        remote = str(body.get('remote_url', '')).strip()
-        if remote and (len(remote) > 2000 or not re.match(r'^(https?://|ssh://|git@[\w.-]+:)', remote) or any(c in remote for c in '\r\n\x00')):
-            raise ValueError('远程地址应为 HTTP(S) 或 SSH Git 仓库地址')
+        if body.get('path'):
+            raise ValueError('项目由程序管理，请仅填写 Git 拉取链接，不再接受本地项目路径')
+        remote, name, repository_id = git_remote(body.get('remote_url', ''))
+        path = self.storage / repository_id
         identifier = uuid.uuid4().hex
         with self.lock:
             if sum(j['state'] == 'running' for j in self.jobs.values()) >= 4:
                 raise ValueError('已有项目正在同步，请稍后重试')
-            self.jobs[identifier] = dict(id=identifier, state='running', message='正在同步远程分支，不切换工作区…')
-        self.pool.submit(self._sync, identifier, Path(path), remote)
+            self.latest_jobs[repository_id] = identifier
+            self.repo_locks.setdefault(repository_id, threading.Lock())
+            self.jobs[identifier] = dict(id=identifier, state='running', root=str(path), remote_url=remote,
+                                         repository_id=repository_id, branches=[], current='', updated_at='',
+                                         message='正在准备仓库同步…')
+        self.pool.submit(self._sync, identifier, path, remote, name, repository_id)
         return self.status(identifier)
 
-    def _sync(self, identifier, path, remote):
-        key = os.path.normcase(str(path.resolve()))
+    def _message(self, identifier, message):
         with self.lock:
-            guard = self.repo_locks.setdefault(key, threading.Lock())
+            self.jobs[identifier]['message'] = message
+
+    @staticmethod
+    def _check_clone(path, remote):
+        if path.is_symlink() or path.resolve() != path or not (path / '.git').is_dir() or (path / '.git').is_symlink():
+            raise ValueError('托管仓库目录异常，请维护者检查 data/projects；不会操作其他本地仓库')
+        configured, _ = run_git(path, 'config', '--get', 'remote.origin.url')
+        if configured.strip() != remote:
+            raise ValueError('托管仓库的 origin 与拉取链接不一致，请维护者检查；不会替换远程地址')
+
+    @staticmethod
+    def _branches(path):
+        refs, _ = run_git(path, 'for-each-ref', '--format=%(refname)', 'refs/remotes/origin/', limit=1024 * 1024)
+        branches = [ref[len('refs/remotes/'):] for ref in refs.splitlines()
+                    if ref.startswith('refs/remotes/origin/') and ref != 'refs/remotes/origin/HEAD']
+        if not branches:
+            raise ValueError('远程仓库没有可读取的分支，请先向仓库推送代码')
+        head, _ = run_git(path, 'ls-remote', '--symref', 'origin', 'HEAD', timeout=120)
+        current = ''
+        for line in head.splitlines():
+            if line.startswith('ref: refs/heads/') and line.endswith('\tHEAD'):
+                selected = 'origin/' + line[len('ref: refs/heads/'):].split('\t', 1)[0]
+                if selected in branches:
+                    current = selected
+                    run_git(path, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/' + selected)
+                    break
+        current = current or branches[0]
+        branches.remove(current)
+        return [current, *branches][:1000], current
+
+    def _sync(self, identifier, path, remote, name, repository_id):
+        guard = self.repo_locks[repository_id]
+        staging = None
         try:
             with guard:
                 if not path.exists():
-                    if not remote:
-                        raise ValueError('项目目录不存在：填写远程地址后可克隆，或先在服务电脑准备仓库')
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    run_git(path.parent, 'clone', '--no-checkout', '--', remote, str(path), timeout=120)
-                repository = inspect_repository(str(path))
-                configured, _ = run_git(path, 'remote', 'get-url', 'origin')
-                if remote and remote.rstrip('/') != configured.strip().rstrip('/'):
-                    raise ValueError('填写的地址与现有 origin 不一致；请在服务电脑修改配置，不会自动替换远程地址')
-                run_git(path, 'fetch', '--no-tags', 'origin', timeout=120)
-                repository = inspect_repository(str(path))
-                result = dict(id=identifier, state='ready', message='同步完成；请选择与日志部署版本对应的分支', **repository)
-        except Exception:
-            result = dict(id=identifier, state='failed', message='项目同步失败。请在服务电脑检查目录、origin、网络与 Git 登录；未切换分支，不会静默使用旧代码。')
+                    self._message(identifier, '首次克隆到 data/projects，正在下载仓库…')
+                    staging = Path(tempfile.mkdtemp(prefix='.clone-', dir=self.storage))
+                    run_git(self.storage, 'clone', '--no-checkout', '--no-tags', '--', remote, str(staging), timeout=120)
+                    self._check_clone(staging, remote)
+                    self._message(identifier, '正在读取远程分支和默认分支…')
+                    branches, current = self._branches(staging)
+                    staging.replace(path)
+                    staging = None
+                else:
+                    self._check_clone(path, remote)
+                    self._message(identifier, '正在更新远程分支，不切换代码工作区…')
+                    run_git(path, 'fetch', '--no-tags', '--prune', 'origin',
+                            '+refs/heads/*:refs/remotes/origin/*', timeout=120)
+                    self._message(identifier, '正在读取远程分支和默认分支…')
+                    branches, current = self._branches(path)
+                updated_at = dt.datetime.now(dt.timezone.utc).isoformat()
+                record = dict(id=repository_id, name=name, remote_url=remote, root=str(path), updated_at=updated_at)
+                with self.lock:
+                    records = {**self.registry, repository_id: record}
+                    atomic_json(self.registry_path, dict(version=1, repositories=list(records.values())))
+                    self.registry = records
+                result = dict(id=identifier, state='ready', root=str(path), remote_url=remote,
+                              repository_id=repository_id, branches=branches, current=current, updated_at=updated_at,
+                              message='同步完成；请选择与日志部署版本对应的远程分支')
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else '请检查托管目录权限、Git 安装、网络和仓库登录'
+            result = dict(id=identifier, state='failed', root=str(path), remote_url=remote,
+                          repository_id=repository_id, branches=[], current='', updated_at='',
+                          message='项目同步失败：' + reason + '；请重试，不会静默使用旧代码。')
+        finally:
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
         with self.lock:
             self.jobs[identifier] = result
             # Completed sync tasks are transient, unlike saved investigations.
@@ -96,11 +241,25 @@ class ChatProjects:
 
     def snapshot(self, body):
         job = self.status(str(body.get('sync_id', '')))
-        if job['state'] != 'ready':
-            raise ValueError('请先完成项目同步')
-        branch = str(body.get('branch', ''))
-        selected = select_revision(job['root'], branch)
-        return dict(project_root=selected['root'], branch=branch, commit=selected['commit'])
+        with self.lock:
+            if job['state'] != 'ready' or self.latest_jobs.get(job['repository_id']) != job['id']:
+                raise ValueError('请先完成本仓库最新一次同步，再重新选择远程分支')
+        guard = self.repo_locks[job['repository_id']]
+        with guard:
+            with self.lock:
+                if job['state'] != 'ready' or self.latest_jobs.get(job['repository_id']) != job['id']:
+                    raise ValueError('请先完成本仓库最新一次同步，再重新选择远程分支')
+            branch = str(body.get('branch', ''))
+            if branch not in job['branches']:
+                raise ValueError('所选远程分支不存在，请重新同步并选择')
+            path = Path(job['root'])
+            self._check_clone(path, job['remote_url'])
+            commit, _ = run_git(path, 'rev-parse', '--verify', 'refs/remotes/' + branch + '^{commit}')
+            commit = commit.strip()
+            # Keep selected commits reachable after branch deletion/force pushes.
+            run_git(path, 'update-ref', 'refs/logscope/snapshots/' + commit, commit)
+            return dict(project_root=str(path), branch=branch, commit=commit,
+                        repository_id=job['repository_id'], remote_url=job['remote_url'])
 
     def close(self):
         self.pool.shutdown(wait=False, cancel_futures=True)

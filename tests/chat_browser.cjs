@@ -101,6 +101,109 @@ async function legacyViewRegression(browser, sourcePage, terminalRequests) {
   } finally { await context.close(); }
 }
 
+async function projectRepositoryRegression(browser, terminalRequests) {
+  // Real Git transport on loopback: no hosted repository or model API is used.
+  const fixture = JSON.parse(fs.readFileSync('test-results/chat-git-fixture.json', 'utf8'));
+  const context = await browser.newContext({viewport:{width:1440,height:1120}});
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  trackTerminalRequests(page, terminalRequests);
+  try {
+    const repository = await (await page.request.get(fixture.control_url + '/__fixture__/repository')).json();
+    await page.goto('http://127.0.0.1:8879');
+    await page.locator('#datasetInfo').filter({hasText:'份日志文件'}).waitFor();
+    await page.locator('[data-view="chat"]').click();
+    await page.locator('#chatCapability').filter({hasText:'共享模型已配置'}).waitFor();
+    assert.equal(await page.locator('#chatProjectPath').count(), 0,
+      'new code investigations should use a Git URL, not a manually prepared local directory');
+    if (!await page.locator('#chatProjectOptions').evaluate(element => element.open))
+      await page.locator('#chatProjectOptions summary').click();
+    await page.locator('#chatUseCode').check();
+    await page.locator('#chatRemoteUrl').fill(repository.remote_url);
+    await page.locator('#chatSyncProject').click();
+    await page.waitForFunction(branch => !document.querySelector('#chatBranch').disabled &&
+      [...document.querySelector('#chatBranch').options].some(option => option.value === branch), repository.branch);
+    const projects = await (await page.request.get('http://127.0.0.1:8879/api/chat/projects')).json();
+    assert.equal(projects.repositories.length, 1, 'first sync should register one cloned repository');
+    const cached = projects.repositories[0];
+    assert.equal(cached.remote_url, repository.remote_url);
+    assert(cached.root.replaceAll('\\', '/').startsWith(projects.storage_path.replaceAll('\\', '/') + '/'),
+      'clone must be inside the server-managed projects directory');
+    assert.equal(await page.locator('#chatRepository').inputValue(), cached.id);
+    const branches = await page.locator('#chatBranch option').evaluateAll(options => options.map(option => option.value));
+    assert(branches.length >= 2 && branches.every(branch => branch.startsWith('origin/') && branch !== 'origin/HEAD'));
+    await page.locator('#chatBranch').selectOption(repository.branch);
+    await page.locator('#chatQuestion').fill('结合已选分支代码，检查 Service.java 的异常证据。');
+    await page.locator('#chatSend').click();
+    await page.locator('#chatPreviewDialog[open]').waitFor();
+    const initialPreview = await page.locator('#chatPreviewText').innerText();
+    assert(initialPreview.includes(repository.initial_commit));
+    assert(initialPreview.includes(repository.branch));
+    assert(initialPreview.includes('project_read'));
+    assert(!initialPreview.includes('fake-secret'));
+    await page.locator('#chatConfirm').click();
+    await page.locator('#chatMessages').filter({hasText:'代码版本已固定，Service.java 中 browser-code-v1 是本轮代码证据'}).waitFor();
+    const sessionId = await page.locator('[data-chat-session].active').getAttribute('data-chat-session');
+    const historyUrl = 'http://127.0.0.1:8879/api/chat/session?id=' + sessionId;
+    const history = await (await page.request.get(historyUrl)).json();
+    assert.equal(history.session.task.project.commit, repository.initial_commit);
+    assert.equal(history.session.task.project.branch, repository.branch);
+    assert.equal(history.session.task.project.repository_id, cached.id);
+    assert(history.events.some(event => event.kind === 'tool' && event.body.name === 'project_read' &&
+      event.body.result.commit === repository.initial_commit && event.body.result.content.includes('browser-code-v1')),
+      'the real code tool must read the selected remote branch at the previewed commit');
+    await page.screenshot({path:'test-results/chat-project-code.png',fullPage:true});
+
+    const advanced = await (await page.request.post(fixture.control_url + '/__fixture__/advance')).json();
+    assert.notEqual(advanced.current_commit, repository.initial_commit);
+    await page.locator('#chatNew').click();
+    await page.locator('#chatUseCode').check();
+    assert.equal(await page.locator('#chatRemoteUrl').inputValue(), repository.remote_url);
+    await page.locator('#chatQuestion').fill('为新任务同步最新远程分支，先预览本次代码范围。');
+    // Sending a new task must fetch automatically even without an explicit update click.
+    await page.locator('#chatSend').click();
+    await page.locator('#chatPreviewDialog[open]').waitFor();
+    const updatedPreview = await page.locator('#chatPreviewText').innerText();
+    assert(updatedPreview.includes(advanced.current_commit));
+    assert(updatedPreview.includes(repository.branch));
+    assert(!updatedPreview.includes(repository.initial_commit));
+    await page.locator('#chatPreviewDialog .close').click();
+    const unchanged = await (await page.request.get(historyUrl)).json();
+    assert.deepEqual(unchanged.session.task, history.session.task,
+      'fetching a new commit must not silently rewrite a saved conversation scope');
+    assert.deepEqual(unchanged.events.filter(event => event.kind === 'scope' || event.kind === 'tool'),
+      history.events.filter(event => event.kind === 'scope' || event.kind === 'tool'));
+
+    await page.reload();
+    await page.locator('#chatCapability').filter({hasText:'共享模型已配置'}).waitFor();
+    if (!await page.locator('#chatProjectOptions').evaluate(element => element.open))
+      await page.locator('#chatProjectOptions summary').click();
+    await page.locator('#chatUseCode').check();
+    assert.equal(await page.locator('#chatRemoteUrl').inputValue(), repository.remote_url,
+      'refresh should retain the chosen Git URL');
+    await page.waitForFunction(id => document.querySelector('#chatRepository').value === id, cached.id);
+    await page.locator('#chatRemoteUrl').fill('');
+    await page.locator('#chatRepository').selectOption(cached.id);
+    assert.equal(await page.locator('#chatRemoteUrl').inputValue(), repository.remote_url,
+      'choosing a cached repository should fill its Git URL');
+    await page.locator('#chatSyncProject').click();
+    await page.waitForFunction(branch => !document.querySelector('#chatBranch').disabled &&
+      document.querySelector('#chatBranch').value === branch, repository.branch);
+    assert.equal((await (await page.request.get('http://127.0.0.1:8879/api/chat/projects')).json()).repositories.length, 1,
+      'repeated updates of a remembered URL must reuse its managed clone');
+    await page.locator(`[data-chat-session="${sessionId}"]`).click();
+    await page.locator('#chatScope').filter({hasText:repository.initial_commit.slice(0,10)}).waitFor();
+    page.on('dialog', dialog => dialog.accept());
+    await page.locator('#chatDelete').click();
+    await page.locator('#chatTitle').filter({hasText:'新建排查'}).waitFor();
+    assert.deepEqual(errors, []);
+  } catch (error) {
+    await page.screenshot({path:'test-results/chat-project-failure.png',fullPage:true});
+    throw error;
+  } finally { await context.close(); }
+}
+
 async function maintenanceRegression(browser, sourcePage, terminalRequests) {
   const datasets = await (await sourcePage.request.get('http://127.0.0.1:8879/api/datasets')).json();
   const dataset = datasets.find(item => item.state === 'ready');
@@ -221,6 +324,23 @@ async function maintenanceRegression(browser, sourcePage, terminalRequests) {
     assert.equal(archive.suggestedFilename(),'过期示例.zip');
     assert.equal(await archive.failure(),null);
     await page.screenshot({path:'test-results/retention-archives.png',fullPage:true});
+    const oldArchiveId = await page.locator('[data-retained-delete]').getAttribute('data-retained-delete');
+    let deleteQuestion = '';
+    page.once('dialog', async dialog => { deleteQuestion = dialog.message(); await dialog.accept(); });
+    const [removedArchive] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === '/api/datasets/delete' &&
+        response.request().method() === 'POST'),
+      page.locator(`[data-retained-delete="${oldArchiveId}"]`).click(),
+    ]);
+    assert.equal(removedArchive.status(), 202);
+    assert(deleteQuestion.includes('过期示例.zip'), 'manual ZIP deletion must confirm the selected archive name');
+    assert.deepEqual(removedArchive.request().postDataJSON(), {dataset:oldArchiveId, compact:false});
+    await page.locator(`[data-retained-delete="${oldArchiveId}"]`).waitFor({state:'hidden'});
+    await page.locator('#retainedCount').filter({hasText:/^0$/}).waitFor();
+    const remainingDatasets = await (await page.request.get('http://127.0.0.1:8879/api/datasets')).json();
+    assert(!remainingDatasets.some(dataset => dataset.id === oldArchiveId),
+      'deleting a legacy retained ZIP must remove its empty metadata row too');
+    assert(remainingDatasets.some(dataset => dataset.state === 'ready'), 'other searchable packages must remain');
     await page.locator('#retainedDialog .close').click();
     await maintenanceRegression(browser,page,terminalRequests);
     await legacyViewRegression(browser,page,terminalRequests);
@@ -264,8 +384,9 @@ async function maintenanceRegression(browser, sourcePage, terminalRequests) {
     await page.locator('#chatDelete').click();
     await page.locator('#chatTitle').filter({hasText:'新建排查'}).waitFor();
     assert.equal(await page.locator('[data-chat-session]').count(),0);
+    await projectRepositoryRegression(browser, terminalRequests);
     assert.deepEqual(terminalRequests, [], 'all browser flows must avoid removed terminal APIs');
-    console.log('Browser regression passed: maintenance 503/drafts/progress/cancel/recovery, retained ZIP/download, terminal-view migration, no terminal API requests, native rules save/preview, tools, evidence, follow-up, delayed chat startup/reload, drafts, sessions, mobile, delete.');
+    console.log('Browser regression passed: maintenance 503/drafts/progress/cancel/recovery, legacy ZIP/download/delete, terminal-view migration, no terminal API requests, native rules save/preview, tools, evidence, follow-up, delayed chat startup/reload, drafts, sessions, mobile, delete, Git URL clone/fetch/branch/commit/history/refresh.');
   } catch(error) {
     await page.screenshot({path:'test-results/chat-failure.png',fullPage:true});
     throw error;

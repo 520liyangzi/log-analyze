@@ -480,7 +480,10 @@ class Store:
                 row['warnings'].append('该日志包使用旧版全文索引；仍可正常搜索，重新导入可减少磁盘占用并加快导入。')
             row['progress'] = self.progress.get(row['id'])
             archive = self.directory / 'archives' / (row['id'] + '.zip')
-            row['archive_bytes'] = archive.stat().st_size if archive.exists() else 0
+            try:
+                row['archive_bytes'] = archive.stat().st_size
+            except FileNotFoundError:
+                row['archive_bytes'] = 0
             row['archive_relative_path'] = 'archives/' + row['id'] + '.zip'
             row['layout_available'] = ((self.directory / 'import-plans' / (row['id'] + '.json')).is_file()
                                        or (row['state'] in ('scanning', 'review', 'failed') and archive.is_file()))
@@ -545,7 +548,7 @@ class Store:
     def require_ready(self, db, identifier):
         row = db.execute('SELECT state FROM datasets WHERE id=?', (identifier,)).fetchone()
         if row and row['state'] == 'expired':
-            raise ValueError('此日志包的索引已过期清理，原始 ZIP 仍保留；请从“保留的 ZIP”下载后重新导入')
+            raise ValueError('此日志包已过期清理；请重新上传保存的 ZIP 或重新采集，导入后新建排查')
         if not row or row['state'] != 'ready':
             raise ValueError('请先选择导入完成的日志包')
 
@@ -766,7 +769,7 @@ class Store:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'LogScope/2.4'
+    server_version = 'LogScope/2.5'
     def log_message(self, fmt, *args):
         pass
     @property
@@ -807,6 +810,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(self.server.chats.get(params.get('id', ''), params.get('after', 0)))
             elif parsed.path == '/api/chat/report':
                 self.json(self.server.chats.report(params.get('id', '')))
+            elif parsed.path == '/api/chat/projects':
+                self.json(self.server.chats.projects.repositories())
             elif parsed.path == '/api/chat/project-sync':
                 self.json(self.server.chats.projects.status(params.get('id', '')))
             elif parsed.path == '/api/datasets':

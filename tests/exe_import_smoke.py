@@ -41,6 +41,14 @@ def run(base):
             assert expected_type in response.headers['Content-Type'], path
             assert response.read(), 'Empty packaged asset: ' + path
 
+    status, projects = request('/api/chat/projects')
+    assert status == 200 and projects['repositories'] == [], projects
+    assert projects['storage_path'].replace('\\', '/').rstrip('/').endswith('/projects'), projects
+    with urlopen(base, timeout=15) as response:
+        html = response.read().decode('utf-8')
+        assert 'id="chatRemoteUrl"' in html and 'id="chatRepository"' in html
+        assert 'id="chatProjectPath"' not in html, 'The managed Git UI must not require a local repository path'
+
     for path, payload in (('/terminal.js', None), ('/vendor/xterm.js', None),
                           ('/api/terminal/config', None), ('/api/terminal/start', {})):
         try:
@@ -79,7 +87,7 @@ def run(base):
     assert 'exe-smoke.zip' in record['source'] and MEMBER in record['source'], record
     _, evidence = request('/api/verify?' + urlencode({'id': record['id']}))
     assert evidence['verified'] and MARKER in evidence['raw'], evidence
-    print('Packaged smoke passed: native assets, no terminal routes, scan-only review, edited layout, confirm, search and ZIP evidence.')
+    print('Packaged smoke passed: native assets, managed Git catalog, no terminal routes, scan-only review, edited layout, confirm, search and ZIP evidence.')
 
 
 if __name__ == '__main__':

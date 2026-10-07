@@ -90,17 +90,18 @@ class RetentionCancelTests(unittest.TestCase):
         self.assertFalse(result['cancelled'], result)
         self.assertTrue(result['compacted'], result)
         stages = {event['stage'] for event in events}
-        self.assertTrue({'checking', 'deleting', 'fts', 'vacuum', 'checkpoint', 'finishing'} <= stages, stages)
+        self.assertTrue({'checking', 'deleting', 'archives', 'fts', 'vacuum', 'checkpoint', 'finishing'} <= stages, stages)
         for event in events:
             self.assertTrue({'stage', 'message', 'elapsed_seconds', 'completed', 'total', 'current', 'cancel_requested'} <= event.keys())
             self.assertGreaterEqual(event['elapsed_seconds'], 0)
         self.assertTrue(any(event['stage'] == 'deleting' and event['current'] == 'progress.zip' for event in events))
         self.assertEqual(self.state(identifier), 'expired')
+        self.assertEqual(result['deleted_archive_count'], 1)
+        self.assertFalse((self.store.directory / 'archives' / (identifier + '.zip')).exists())
         self.assert_released()
 
-    def test_cancel_before_fts_keeps_committed_expiry_and_zip(self):
+    def test_cancel_before_fts_keeps_completed_archive_deletion(self):
         identifier = self.imported('cancel-fts.zip')
-        original_hash = self.zip_hash(identifier)
 
         def on_progress(snapshot):
             if snapshot['stage'] == 'fts':
@@ -112,11 +113,40 @@ class RetentionCancelTests(unittest.TestCase):
         self.assertFalse(result['deferred'], result)
         self.assertEqual(result['expired_ids'], [identifier])
         self.assertEqual(self.state(identifier), 'expired')
-        self.assertEqual(self.zip_hash(identifier), original_hash)
+        self.assertEqual(result['deleted_archive_count'], 1)
+        self.assertFalse((self.store.directory / 'archives' / (identifier + '.zip')).exists())
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (identifier,)).fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT value FROM log_metadata WHERE key='compaction_pending'").fetchone()[0], '1')
         self.assert_released()
+
+    def test_cancel_between_index_commit_and_unlink_preserves_zip_for_retry(self):
+        identifier = self.imported('cancel-archive.zip')
+        original_hash = self.zip_hash(identifier)
+        plan = self.store.directory / 'import-plans' / (identifier + '.json')
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        plan.write_text('{"synthetic":true}', 'utf-8')
+
+        def on_progress(snapshot):
+            if snapshot['stage'] == 'archives':
+                control.cancel()
+
+        control = self.control(on_progress=on_progress)
+        result = self.store.expire_indexes(CUTOFF, control=control)
+        self.assertTrue(result['cancelled'], result)
+        self.assertFalse(result['deferred'], result)
+        self.assertEqual(result['deleted_archive_count'], 0)
+        self.assertEqual(self.state(identifier), 'expired')
+        self.assertEqual(self.zip_hash(identifier), original_hash)
+        self.assertTrue(plan.exists())
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (identifier,)).fetchone()[0], 0)
+        self.assert_released()
+        retry = self.store.expire_indexes(CUTOFF)
+        self.assertFalse(retry['deferred'], retry)
+        self.assertEqual(retry['deleted_archive_count'], 1)
+        self.assertFalse((self.store.directory / 'archives' / (identifier + '.zip')).exists())
+        self.assertFalse(plan.exists())
 
     def test_second_package_cancellation_preserves_first_commit_and_second_index(self):
         identifiers = [self.imported(name) for name in ('first.zip', 'second.zip')]
@@ -138,14 +168,16 @@ class RetentionCancelTests(unittest.TestCase):
         for identifier in identifiers:
             expected = 'expired' if identifier in result['expired_ids'] else 'ready'
             self.assertEqual(self.state(identifier), expected)
-            self.assertEqual(self.zip_hash(identifier), archives[identifier])
+            if expected == 'expired':
+                self.assertFalse((self.store.directory / 'archives' / (identifier + '.zip')).exists())
+            else:
+                self.assertEqual(self.zip_hash(identifier), archives[identifier])
             if expected == 'ready':
                 self.assertEqual(self.store.search({'dataset': identifier})['summary']['total'], 12)
         self.assert_released()
 
     def test_short_timeout_preserves_committed_expiry_and_marks_non_retrying_stop(self):
         identifier = self.imported('timeout.zip')
-        original_hash = self.zip_hash(identifier)
         reached_fts = threading.Event()
 
         def on_progress(snapshot):
@@ -164,11 +196,13 @@ class RetentionCancelTests(unittest.TestCase):
         self.assertEqual(result['stop_reason'], 'timeout')
         self.assertEqual(result['expired_ids'], [identifier])
         self.assertEqual(self.state(identifier), 'expired')
-        self.assertEqual(self.zip_hash(identifier), original_hash)
+        self.assertEqual(result['deleted_archive_count'], 1)
+        self.assertFalse((self.store.directory / 'archives' / (identifier + '.zip')).exists())
         self.assert_released()
 
     def test_sql_interrupt_rolls_back_current_package_after_rows_begin_deleting(self):
         identifier = self.imported('rollback.zip')
+        original_hash = self.zip_hash(identifier)
         control = self.control()
         reached_delete = threading.Event()
         original_connect = sqlite3.connect
@@ -188,6 +222,8 @@ class RetentionCancelTests(unittest.TestCase):
         with mock.patch('app.sqlite3.connect', side_effect=connect):
             result = self.store.expire_indexes(CUTOFF, control=control)
         self.assertTrue(reached_delete.is_set(), 'fixture must reach a real SQLite DELETE')
+        self.assertEqual(self.zip_hash(identifier), original_hash)
+        self.assertEqual(result['deleted_archive_count'], 0)
         self.assertTrue(result['cancelled'], result)
         self.assertEqual(result['expired_count'], 0)
         self.assertEqual(self.state(identifier), 'ready')

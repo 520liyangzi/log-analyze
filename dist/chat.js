@@ -2,14 +2,30 @@
 (() => {
   let selected=sessionStorage.getItem('logscope.chat.selected')||'', current=null, cursor=0, generation=0;
   let timer=null, busy=false, configured=false, project=null, projectDirty=false, pending=null;
-  let sessions=[], listing=0;
+  let sessions=[], listing=0, repositories=[], projectListing=0, projectGeneration=0, syncing=false, preparation=0, submitting=false;
   const labels={search_logs:'搜索日志索引',log_context:'读取异常上下文',correlate_logs:'查询相邻 Pod 日志',verify_log:'核验原始日志',project_search:'搜索项目代码',project_read:'读取局部代码'};
   const states={running:'排查中',stopping:'正在停止',idle:'已保存',stopped:'已停止',failed:'可重试',interrupted:'已中断'};
   const running=()=>['running','stopping'].includes(current?.state);
   const storage=(key,value)=>{try{if(value===undefined)return localStorage.getItem(key);localStorage.setItem(key,value);}catch{}return '';};
   const draftKey=()=>`logscope.chat.draft.${selected||'new'}`;
+  const remoteUrl=()=>$('#chatRemoteUrl').value.trim().replace(/\/+$/, '');
+  const branchKey=url=>'logscope.chat.branch.'+encodeURIComponent(url);
+  const cancelled=()=>Object.assign(new Error('项目选择已更改，本次准备已取消'),{cancelled:true});
+  const projectHint='首次使用会自动克隆，后续更新会拉取远程分支。请选择与日志部署版本一致的分支；发送前可预览固定版本。';
   $('#chatQuestion').value=storage(draftKey())||'';
+  $('#chatRemoteUrl').value=storage('logscope.chat.remote_url')||'';
   function remember(){storage(draftKey(),$('#chatQuestion').value);}
+  function invalidatePreview(){preparation++;pending=null;if(!submitting)busy=false;if($('#chatPreviewDialog').open)$('#chatPreviewDialog').close();}
+  function resetProject(dirty=true){projectGeneration++;syncing=false;project=null;projectDirty=dirty;invalidatePreview();$('#chatBranch').innerHTML='<option value="">更新代码后选择分支</option>';$('#chatProjectNote').textContent=projectHint;}
+  function renderRepositories(){
+    $('#chatRepository').innerHTML='<option value="">输入新的 Git 仓库地址</option>'+repositories.map(repo=>`<option value="${escapeHTML(repo.id)}">${escapeHTML(repo.name)} · ${escapeHTML(repo.remote_url)}</option>`).join('');
+    $('#chatRepository').value=repositories.find(repo=>repo.remote_url===remoteUrl())?.id||'';
+  }
+  async function refreshProjects(){
+    const serial=++projectListing;$('#chatRefreshProjects').disabled=true;
+    try{const result=await api('/api/chat/projects');if(serial!==projectListing)return;repositories=result.repositories||[];renderRepositories();$('#chatProjectStorage').textContent='仓库保存位置：'+(result.storage_path||'data/projects');}
+    finally{if(serial===projectListing)$('#chatRefreshProjects').disabled=false;}
+  }
   function inline(text){return escapeHTML(text).replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');}
   function markdown(text){
     return String(text||'').split(/```[^\n]*\n([\s\S]*?)(?:```|$)/g).map((part,i)=>i%2?`<pre><code>${escapeHTML(part)}</code></pre>`:part.split('\n').map(line=>{
@@ -19,14 +35,18 @@
     }).join('')).join('');
   }
   function controls(){
-    $('#chatSend').disabled=busy||running()||!configured;
-    $('#chatSend').textContent=busy?'正在准备…':current?.state==='failed'?'继续排查 ↑':'发送并排查 ↑';
+    $('#chatSend').disabled=busy||syncing||running()||!configured;
+    $('#chatSend').textContent=syncing?'正在同步代码…':busy?'正在准备…':current?.state==='failed'?'继续排查 ↑':'发送并排查 ↑';
     $('#chatStop').hidden=!running();$('#chatStop').disabled=current?.state==='stopping';
     $('#chatDelete').disabled=!selected||running()||busy;$('#chatDownload').disabled=!selected;
-    $('#chatNew').disabled=busy;$('#chatActivity').hidden=!current;
+    $('#chatNew').disabled=busy&&!syncing;$('#chatActivity').hidden=!current;
     if(current){$('#chatActivity').textContent=current.status;$('#chatActivity').classList.toggle('working',running());}
-    $('#chatProjectSummary').textContent=$('#chatUseCode').checked?(project?'已同步 · '+$('#chatBranch').value:current?.task.project?'固定版本 · '+current.task.project.branch:'启用后同步所选项目'):'未启用 · 仅分析日志';
+    $('#chatProjectSummary').textContent=$('#chatUseCode').checked?(syncing?'正在同步代码…':project?'已同步 · '+$('#chatBranch').value:current?.task.project&&!projectDirty?'固定版本 · '+current.task.project.branch:'待同步 · Git 仓库'):'未启用 · 仅分析日志';
     $('#chatProjectFields').hidden=!$('#chatUseCode').checked;
+    $('#chatSyncProject').disabled=syncing||busy||running()||!remoteUrl();
+    $('#chatBranch').disabled=!project||syncing||busy||running();
+    $('#chatRemoteUrl').disabled=submitting;$('#chatRepository').disabled=submitting;$('#chatUseCode').disabled=submitting;
+    $('#chatProjectNote').dataset.working=String(syncing);
   }
   function renderSessions(){
     $('#chatSessionList').innerHTML=sessions.length?sessions.map(s=>`<button class="chat-session ${s.id===selected?'active':''}" data-chat-session="${s.id}"><span class="chat-session-title">${escapeHTML(s.title)}</span><span><i class="${s.state==='running'?'live':''}"></i>${states[s.state]||s.state} · ${escapeHTML(s.task.name)}</span></button>`).join(''):'<div class="chat-list-empty">暂无排查会话<br>发出第一个问题后自动保存</div>';
@@ -74,80 +94,99 @@
     }catch(e){if(serial===generation){toast(e.message);timer=setTimeout(()=>poll(serial),4000);}}
   }
   async function selectSession(id){
-    if(busy)return;remember();clearTimeout(timer);const serial=++generation;
+    if(busy&&!syncing)return;remember();clearTimeout(timer);resetProject(false);const serial=++generation;
     selected=id;sessionStorage.setItem('logscope.chat.selected',id);cursor=0;current=null;project=null;projectDirty=false;
     $('#chatQuestion').value=storage(draftKey())||'';$('#chatMessages').innerHTML='';
     try{
       const result=await api('/api/chat/session?id='+encodeURIComponent(id));if(serial!==generation)return;
       cursor=result.cursor;applySession(result.session);renderEvents(result.events);
       const p=current.task.project;$('#chatUseCode').checked=Boolean(p);
-      if(p){$('#chatProjectPath').value=p.project_root;$('#chatBranch').innerHTML=`<option>${escapeHTML(p.branch)}</option>`;$('#chatBranch').disabled=true;$('#chatProjectNote').textContent=`固定代码版本 ${p.commit}；如需更新，请重新同步并预览。`;}
+      $('#chatRemoteUrl').value=p?(p.remote_url||''):(storage('logscope.chat.remote_url')||'');
+      if(p){$('#chatBranch').innerHTML=`<option value="${escapeHTML(p.branch)}">${escapeHTML(p.branch)}</option>`;$('#chatProjectNote').textContent=`固定代码版本 ${p.commit}，继续对话将沿用此版本。`+(p.remote_url?'如需更新，请更新代码并重新预览。':'此历史会话未记录 Git 地址，可填写 Git 仓库地址后更新。');}
+      renderRepositories();
       controls();renderSessions();timer=setTimeout(()=>poll(serial),650);
-    }catch(e){toast(e.message);newSession();}
+    }catch(e){if(serial===generation){toast(e.message);newSession();}}
   }
   function newSession(){
-    if(busy)return;remember();clearTimeout(timer);generation++;selected='';current=null;project=null;cursor=0;projectDirty=false;
+    if(busy&&!syncing)return;remember();clearTimeout(timer);resetProject(false);generation++;selected='';current=null;project=null;cursor=0;projectDirty=false;
     sessionStorage.removeItem('logscope.chat.selected');$('#chatTitle').textContent='新建排查';$('#chatScope').textContent='使用左侧当前日志包';
-    $('#chatQuestion').value=storage(draftKey())||'';$('#chatUseCode').checked=false;$('#chatBranch').innerHTML='<option value="">先同步项目</option>';$('#chatBranch').disabled=true;
+    $('#chatQuestion').value=storage(draftKey())||'';$('#chatUseCode').checked=false;$('#chatRemoteUrl').value=storage('logscope.chat.remote_url')||'';renderRepositories();
     welcome();controls();renderSessions();$('#chatQuestion').focus();
   }
   async function capability(){
     const result=await api('/api/chat/capability');configured=result.configured;$('#chatCapability').textContent=result.message;
     $('.chat-status-dot').classList.toggle('ready',configured);
-    if(!$('#chatProjectPath').value)$('#chatProjectPath').value=storage('logscope.chat.project')||result.default_project_path;
     controls();
   }
   async function syncProject(){
-    const path=$('#chatProjectPath').value.trim(),oldBranch=$('#chatBranch').value;
-    $('#chatSyncProject').disabled=true;$('#chatBranch').disabled=true;project=null;
-    $('#chatProjectNote').textContent='正在同步远程仓库…';
+    const url=remoteUrl();if(!url)throw new Error('请填写 Git 仓库地址，或选择已有仓库');
+    const serial=++projectGeneration,session=selected,oldBranch=$('#chatBranch').value;
+    const valid=()=>serial===projectGeneration&&session===selected&&url===remoteUrl();
+    const checkCurrent=()=>{if(!valid())throw cancelled();};
+    syncing=true;project=null;projectDirty=true;$('#chatProjectNote').textContent='正在准备仓库；首次克隆可能需要一些时间…';controls();
     try{
-      const job=await api('/api/chat/project-sync',{path,remote_url:$('#chatRemoteUrl').value.trim()});
-      const result=await new Promise((resolve,reject)=>{
-        const check=async()=>{try{const value=await api('/api/chat/project-sync?id='+job.id);if(value.state==='ready')resolve(value);else if(value.state==='failed')reject(new Error(value.message));else setTimeout(check,900);}catch(e){reject(e);}};check();
-      });
-      project=result;projectDirty=false;storage('logscope.chat.project',path);
-      $('#chatBranch').innerHTML=result.branches.map(b=>`<option value="${escapeHTML(b)}">${escapeHTML(b)}</option>`).join('');
-      $('#chatBranch').value=result.branches.includes(oldBranch)?oldBranch:result.branches.includes('origin/'+result.current)?'origin/'+result.current:result.branches.find(b=>b.startsWith('origin/'))||result.branches[0];
-      $('#chatBranch').disabled=false;$('#chatProjectNote').textContent=result.message+'。本地分支可能落后，通常应选择 origin/ 分支。';
+      const job=await api('/api/chat/project-sync',{remote_url:url});checkCurrent();
+      let result=job;
+      while(!['ready','failed'].includes(result.state)){
+        $('#chatProjectNote').textContent=result.message||'正在克隆 / 更新远程仓库，请稍候…';
+        await new Promise(resolve=>setTimeout(resolve,900));checkCurrent();
+        result=await api('/api/chat/project-sync?id='+encodeURIComponent(job.id));checkCurrent();
+      }
+      if(result.state==='failed')throw new Error(result.message||'仓库同步失败，请检查地址与服务电脑的 Git 访问权限后重试');
+      const branches=(result.branches||[]).filter(branch=>branch.startsWith('origin/')&&branch!=='origin/HEAD');
+      if(!branches.length)throw new Error('仓库没有可用的远程分支，请检查仓库后重试');
+      project=result;projectDirty=false;storage('logscope.chat.remote_url',url);
+      $('#chatBranch').innerHTML=branches.map(branch=>`<option value="${escapeHTML(branch)}">${escapeHTML(branch)}</option>`).join('');
+      const preferred=oldBranch||storage(branchKey(url));
+      $('#chatBranch').value=branches.includes(preferred)?preferred:branches.includes(result.current)?result.current:branches[0];
+      storage(branchKey(url),$('#chatBranch').value);
+      $('#chatProjectNote').textContent=(result.message||'代码已更新')+'。请选择与日志部署版本一致的远程分支；预览将显示固定 commit。';
+      await refreshProjects().catch(()=>{});checkCurrent();
       controls();return result;
-    }finally{$('#chatSyncProject').disabled=false;}
+    }catch(e){if(!valid())throw cancelled();$('#chatProjectNote').textContent=e.message;throw e;}
+    finally{if(valid()){syncing=false;controls();}}
   }
   async function prepare(){
-    if(busy||running())return;if(!$('#chatQuestion').value.trim())return toast('请先输入问题');if(!selected&&!needDataset())return;
+    if(busy||syncing||running())return;if(!$('#chatQuestion').value.trim())return toast('请先输入问题');if(!selected&&!needDataset())return;
+    const serial=++preparation,session=selected,question=$('#chatQuestion').value,dataset=state.dataset;
+    const checkCurrent=()=>{if(serial!==preparation||session!==selected)throw cancelled();};
     busy=true;controls();
     try{
       const useCode=$('#chatUseCode').checked;
       if(useCode&&!project&&(!current?.task.project||projectDirty))await syncProject();
-      pending=await api('/api/chat/preview',{id:selected,dataset:state.dataset,question:$('#chatQuestion').value,use_code:useCode,
+      checkCurrent();
+      const result=await api('/api/chat/preview',{id:session,dataset,question,use_code:useCode,
         sync_id:useCode&&project?project.id:'',branch:$('#chatBranch').value});
+      checkCurrent();pending=result;
       pending.request_id=globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);
-      pending.draft_text=$('#chatQuestion').value;
+      pending.draft_text=question;
       if($('#chatPreviewEnabled').checked){$('#chatPreviewText').textContent=pending.text;$('#chatPreviewDialog').showModal();}
       else await submit();
-    }catch(e){toast(e.message);}
-    finally{busy=false;controls();}
+    }catch(e){if(!e.cancelled)toast(e.message);}
+    finally{if(serial===preparation){busy=false;controls();}}
   }
   async function submit(){
-    if(!pending)return;
-    $('#chatConfirm').disabled=true;
+    if(!pending||submitting)return;
+    const request=pending;submitting=true;busy=true;$('#chatConfirm').disabled=true;controls();
     try{
-      const result=await api('/api/chat/send',{preview_id:pending.preview_id,request_id:pending.request_id});
-      if($('#chatQuestion').value===pending.draft_text){$('#chatQuestion').value='';remember();}
+      const result=await api('/api/chat/send',{preview_id:request.preview_id,request_id:request.request_id});
+      if($('#chatQuestion').value===request.draft_text){$('#chatQuestion').value='';remember();}
       $('#chatPreviewDialog').close();pending=null;
-      busy=false;await refreshList();await selectSession(result.id);
+      busy=false;submitting=false;await refreshList();await selectSession(result.id);
     }catch(e){toast(e.message);}
-    finally{$('#chatConfirm').disabled=false;}
+    finally{submitting=false;busy=false;$('#chatConfirm').disabled=false;controls();}
   }
   $('#chatSend').addEventListener('click',prepare);$('#chatConfirm').addEventListener('click',submit);
   $('#chatQuestion').addEventListener('input',remember);
   $('#chatQuestion').addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();prepare();}});
   $('#chatPreviewEnabled').checked=storage('logscope.chat.preview')!=='false';
   $('#chatPreviewEnabled').addEventListener('change',()=>storage('logscope.chat.preview',String($('#chatPreviewEnabled').checked)));
-  $('#chatUseCode').addEventListener('change',controls);
-  for(const id of ['chatProjectPath','chatRemoteUrl'])$('#'+id).addEventListener('input',()=>{project=null;projectDirty=true;$('#chatBranch').disabled=true;controls();});
-  $('#chatBranch').addEventListener('change',controls);
-  $('#chatSyncProject').addEventListener('click',()=>syncProject().catch(e=>{$('#chatProjectNote').textContent=e.message;toast(e.message);}));
+  $('#chatUseCode').addEventListener('change',()=>{if(syncing)resetProject();else invalidatePreview();controls();});
+  $('#chatRemoteUrl').addEventListener('input',()=>{resetProject();renderRepositories();controls();});
+  $('#chatRepository').addEventListener('change',()=>{const repo=repositories.find(item=>item.id===$('#chatRepository').value);resetProject();$('#chatRemoteUrl').value=repo?.remote_url||'';controls();});
+  $('#chatRefreshProjects').addEventListener('click',()=>refreshProjects().catch(e=>toast(e.message)));
+  $('#chatBranch').addEventListener('change',()=>{invalidatePreview();storage(branchKey(remoteUrl()),$('#chatBranch').value);controls();});
+  $('#chatSyncProject').addEventListener('click',()=>{invalidatePreview();syncProject().catch(e=>{if(!e.cancelled)toast(e.message);});});
   $('#chatNew').addEventListener('click',newSession);
   $('#chatRefresh').addEventListener('click',()=>refreshList().catch(e=>toast(e.message)));
   $('#chatRefreshConfig').addEventListener('click',()=>capability().catch(e=>toast(e.message)));
@@ -166,7 +205,8 @@
   });
   let loaded=false;
   document.addEventListener('logscope:view',async event=>{
-    if(event.detail!=='chat'){clearTimeout(timer);generation++;return;}
+    if(event.detail!=='chat'){clearTimeout(timer);generation++;if(syncing){resetProject();controls();}return;}
+    void refreshProjects().catch(e=>toast('仓库列表暂不可用：'+e.message));
     try{await capability();await refreshList();if(!loaded){loaded=true;if(selected&&sessions.some(s=>s.id===selected))await selectSession(selected);else newSession();}else if(selected)await poll(++generation);}catch(e){toast(e.message);}
   });
 })();

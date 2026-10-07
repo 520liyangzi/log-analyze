@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import sqlite3
 import shutil
 import ssl
@@ -117,6 +118,14 @@ class NativeChatTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        self.git_environment = mock.patch.dict(os.environ, {
+            'GIT_CONFIG_COUNT': '1',
+            'GIT_CONFIG_KEY_0': 'url.' + self.root.as_uri() + '/.insteadOf',
+            'GIT_CONFIG_VALUE_0': 'https://git.fixture.invalid/',
+            'GIT_ALLOW_PROTOCOL': 'file',
+        })
+        self.git_environment.start()
+        self.addCleanup(self.git_environment.stop)
         self.store = Store(self.root / 'data')
         self.dataset = self.store.submit(create_demo(self.root / 'demo.zip'), 'demo.zip')
         self.store.pool.shutdown(wait=True)
@@ -160,12 +169,13 @@ class NativeChatTests(unittest.TestCase):
         bare = self.root / 'origin.git'
         bare.mkdir()
         git(bare, 'init', '--bare')
+        git(bare, 'symbolic-ref', 'HEAD', 'refs/heads/main')
         git(repo, 'remote', 'add', 'origin', str(bare))
         git(repo, 'push', '-u', 'origin', 'main')
         return repo
 
     def sync(self, repo):
-        job = self.chat.projects.sync(dict(path=str(repo)))
+        job = self.chat.projects.sync(dict(remote_url='https://git.fixture.invalid/origin.git'))
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             job = self.chat.projects.status(job['id'])
@@ -375,6 +385,10 @@ class ChatHTTPTests(unittest.TestCase):
                 self.assertNotIn('private-key', data)
                 self.assertNotIn('private.internal', data)
                 self.assertIn('FMEMateService', data)
+                with urlopen(base + '/api/chat/projects') as r:
+                    projects = json.load(r)
+                self.assertEqual(projects, dict(storage_path=str((Path(temporary) / 'data' / 'projects').resolve()),
+                                                repositories=[]))
                 for path in ['/data/ai-config.json', '/ai-config.json', '/api/chat/config']:
                     with self.assertRaises(HTTPError) as exc:
                         urlopen(base + path)

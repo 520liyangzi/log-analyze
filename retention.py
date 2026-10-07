@@ -34,7 +34,7 @@ class RetentionManager:
         self._last_progress = None
         self._retry_at = None
         self._phase = 'idle'
-        self._message = '每天本机 02:00 清理过期索引；启动不补跑，错过等下一天。'
+        self._message = '每天本机 02:00 清理超过 72 小时的日志包和索引；启动不补跑，错过等下一天。'
         self.config = self.DEFAULT_CONFIG.copy()
         self._read_config()
         self._load()
@@ -253,7 +253,7 @@ class RetentionManager:
                     job['control'] = control
                     stopped = self._closed or job['cancel_requested']
                     self._phase = 'cancelling' if stopped else 'running'
-                    self._message = '正在停止本次清理，等待数据库操作退出…' if stopped else '正在检查过期索引…'
+                    self._message = '正在停止本次清理，等待数据库操作退出…' if stopped else '正在检查过期日志包和索引…'
                     self._last_run = started.isoformat()
             if stopped:
                 control.cancel()
@@ -295,7 +295,7 @@ class RetentionManager:
             self._last_progress = progress or self._last_progress
             self._retry_at = self._retry_time(finished) if deferred else None
             self._phase = 'cancelled' if stopped else ('error' if result.get('error') else 'deferred') if deferred else 'idle'
-            self._message = str(result.get('reason') or ('本次清理完成；ZIP、AI 历史和配置保留。' if not deferred
+            self._message = str(result.get('reason') or ('本次清理完成；AI 历史、配置和代码仓保留。' if not deferred
                                                        else '本次清理暂缓，将在允许的夜间时段再检查。'))
             payload = dict(version=2, last_completed_day=completed.isoformat() if completed else None,
                            last_attempt_day=self._last_attempt_day.isoformat() if self._last_attempt_day else None,

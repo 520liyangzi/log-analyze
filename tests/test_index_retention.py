@@ -1,4 +1,4 @@
-"""Index expiry uses generated fixtures only; original ZIPs must stay intact."""
+"""Log retention uses generated fixtures; expired ZIPs and indexes are removed."""
 import datetime as dt
 import hashlib
 import json
@@ -56,8 +56,14 @@ class IndexRetentionTests(unittest.TestCase):
         with self.store.connect() as db:
             return dict(db.execute('SELECT * FROM datasets WHERE id=?', (identifier,)).fetchone())
 
+    def archive_path(self, identifier):
+        return self.store.directory / 'archives' / (identifier + '.zip')
+
+    def plan_path(self, identifier):
+        return self.store.directory / 'import-plans' / (identifier + '.json')
+
     def archive_hash(self, identifier):
-        return hashlib.sha256((self.store.directory / 'archives' / (identifier + '.zip')).read_bytes()).hexdigest()
+        return hashlib.sha256(self.archive_path(identifier).read_bytes()).hexdigest()
 
     def test_72_hour_boundary_uses_import_completion_and_legacy_created_fallback(self):
         cases = [
@@ -82,19 +88,26 @@ class IndexRetentionTests(unittest.TestCase):
             with self.subTest(identifier=identifier):
                 self.assertEqual(self.state(identifier)['state'], expected)
                 self.assertEqual(bool(self.state(identifier)['expired_at']), expected == 'expired')
+                self.assertEqual(self.archive_path(identifier).exists(), expected != 'expired')
 
-    def test_expiry_preserves_zip_history_configuration_and_other_searchable_package(self):
+    def test_expiry_removes_old_zip_and_preserves_history_configuration_and_other_package(self):
         old = self.imported('old.zip', 'old-package-marker')
         current = self.imported('current.zip', 'current-package-marker')
         self.age(old)
         self.age(current, NOW)
-        originals = {identifier: self.archive_hash(identifier) for identifier in (old, current)}
+        current_hash = self.archive_hash(current)
+        old_archive_bytes = self.archive_path(old).stat().st_size
+        old_plan = self.plan_path(old)
+        old_plan.parent.mkdir(parents=True, exist_ok=True)
+        old_plan.write_text('{"synthetic":true}', 'utf-8')
         preserved = {
             self.store.directory / 'chat.sqlite3': b'synthetic conversation database bytes',
             self.store.directory / 'ai-config.json': b'{"api_key":"synthetic-not-a-real-key"}',
             self.store.directory / 'retention-owner-note.txt': b'not part of a log index',
             self.store.directory / 'chat-sessions' / 'sample' / 'report.md': '已保存的排查报告'.encode(),
             self.store.directory / 'downloads' / 'download.zip': b'downloaded-original-fixture',
+            self.store.directory / 'projects' / 'sample-repository' / '.git' / 'HEAD': b'ref: refs/heads/main\n',
+            self.store.directory / 'projects' / 'sample-repository' / '.git' / 'objects' / 'fixture': b'pinned-code-object',
         }
         for path, content in preserved.items():
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,8 +115,11 @@ class IndexRetentionTests(unittest.TestCase):
         result = self.store.expire_indexes(CUTOFF)
         self.assertEqual(result['expired_ids'], [old])
         self.assertTrue(result['compacted'], result)
-        for identifier, expected in originals.items():
-            self.assertEqual(self.archive_hash(identifier), expected)
+        self.assertFalse(self.archive_path(old).exists())
+        self.assertFalse(old_plan.exists())
+        self.assertEqual(self.archive_hash(current), current_hash)
+        self.assertEqual(result['deleted_archive_count'], 1)
+        self.assertEqual(result['deleted_archive_bytes'], old_archive_bytes)
         for path, content in preserved.items():
             self.assertEqual(path.read_bytes(), content)
         self.assertEqual(self.store.search({'dataset': current, 'q': 'current-package-marker'})['summary']['total'], 2)
@@ -112,20 +128,20 @@ class IndexRetentionTests(unittest.TestCase):
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (old,)).fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM files WHERE dataset=?', (old,)).fetchone()[0], 0)
-        path, name = self.store.original_archive(old)
-        self.assertEqual(name, 'old.zip')
-        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), originals[old])
+        with self.assertRaises(ValueError):
+            self.store.original_archive(old)
 
     def test_reimport_never_reuses_old_log_evidence_ids(self):
         old = self.imported('first.zip')
         before_ids = {row['id'] for row in self.store.search({'dataset': old})['rows']}
         self.age(old)
-        original = self.store.directory / 'archives' / (old + '.zip')
+        original = self.archive_path(old)
+        copy = self.root / 'reimport.zip'
+        shutil.copyfile(original, copy)  # User-kept backup, outside managed data.
         self.store.expire_indexes(CUTOFF)
         self.store.pool.shutdown(wait=True)
         self.store = Store(self.root / 'data')
-        copy = self.root / 'reimport.zip'
-        shutil.copyfile(original, copy)
+        self.assertFalse(original.exists())
         new = self.store.submit(copy, 'reimport.zip')
         self.store.pool.submit(lambda: None).result(timeout=30)
         after_ids = {row['id'] for row in self.store.search({'dataset': new})['rows']}
@@ -135,9 +151,8 @@ class IndexRetentionTests(unittest.TestCase):
             self.store.verify(min(before_ids))
         self.assertTrue(self.store.verify(min(after_ids))['verified'])
 
-    def test_failed_partial_import_expires_by_creation_time_and_keeps_original_zip(self):
+    def test_failed_partial_import_expires_by_creation_time_and_removes_original_zip(self):
         identifier = self.imported('partial.zip', marker='partial-import-marker')
-        original_hash = self.archive_hash(identifier)
         with self.store.connect() as db:
             db.execute("UPDATE datasets SET state='failed',created=?,completed_at=? WHERE id=?",
                        (CUTOFF.isoformat(), NOW.isoformat(), identifier))
@@ -145,11 +160,120 @@ class IndexRetentionTests(unittest.TestCase):
         self.assertFalse(result['deferred'], result)
         self.assertEqual(result['expired_ids'], [identifier])
         self.assertEqual(self.state(identifier)['state'], 'expired')
-        self.assertEqual(self.archive_hash(identifier), original_hash)
+        self.assertFalse(self.archive_path(identifier).exists())
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (identifier,)).fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM files WHERE dataset=?', (identifier,)).fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT count(*) FROM log_fts_v2 WHERE log_fts_v2 MATCH 'par'").fetchone()[0], 0)
+
+    def test_review_failed_and_old_expired_archives_are_cleaned_even_without_index_rows(self):
+        entries = [
+            ('a' * 32, 'review', CUTOFF, NOW, True),
+            ('b' * 32, 'failed', CUTOFF, NOW, True),
+            ('c' * 32, 'expired', NOW, CUTOFF, True),
+            ('d' * 32, 'review', NOW, CUTOFF, False),
+            ('e' * 32, 'failed', NOW, CUTOFF, False),
+            ('f' * 32, 'expired', CUTOFF, NOW, False),
+        ]
+        archive_bytes = 0
+        for identifier, state, created, completed, expired in entries:
+            with self.store.connect() as db:
+                db.execute('INSERT INTO datasets(id,name,state,created,completed_at) VALUES(?,?,?,?,?)',
+                           (identifier, state + '.zip', state, created.isoformat(), completed.isoformat()))
+            self.archive_path(identifier).write_bytes(b'synthetic archive ' + identifier.encode())
+            plan = self.plan_path(identifier)
+            plan.parent.mkdir(parents=True, exist_ok=True)
+            plan.write_text('{"files":[]}', 'utf-8')
+            if expired:
+                archive_bytes += self.archive_path(identifier).stat().st_size
+        outcome = self.store.expire_indexes(CUTOFF)
+        self.assertFalse(outcome['deferred'], outcome)
+        self.assertEqual(set(outcome['expired_ids']), {entry[0] for entry in entries if entry[4]})
+        self.assertEqual(outcome['deleted_archive_count'], 3)
+        self.assertEqual(outcome['deleted_archive_bytes'], archive_bytes)
+        for identifier, state, _, _, expired in entries:
+            self.assertEqual(self.archive_path(identifier).exists(), not expired)
+            self.assertEqual(self.plan_path(identifier).exists(), not expired)
+            self.assertEqual(self.state(identifier)['state'], 'expired' if expired else state)
+        # Cleared tombstones must not repeatedly rewrite/vacuum the database.
+        again = self.store.expire_indexes(CUTOFF)
+        self.assertFalse(again['deferred'], again)
+        self.assertEqual(again['expired_count'], 0)
+        self.assertEqual(again['deleted_archive_count'], 0)
+        self.assertEqual(again['deleted_archive_bytes'], 0)
+        self.assertFalse(again['compacted'], again)
+
+    def test_archive_unlink_failure_keeps_committed_tombstone_and_retries_after_restart(self):
+        identifier = self.imported('locked-archive.zip')
+        self.age(identifier)
+        archive = self.archive_path(identifier)
+        original_hash = self.archive_hash(identifier)
+        archive_size = archive.stat().st_size
+        plan = self.plan_path(identifier)
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        plan.write_text('{"synthetic":true}', 'utf-8')
+        unlink = Path.unlink
+        observed = []
+
+        def deny_archive(path, *args, **kwargs):
+            if path == archive:
+                # This is a second connection, so it observes only committed SQL.
+                with self.store.connect() as db:
+                    observed.append(db.execute('SELECT state FROM datasets WHERE id=?', (identifier,)).fetchone()[0])
+                    self.assertEqual(db.execute('SELECT count(*) FROM logs WHERE dataset=?', (identifier,)).fetchone()[0], 0)
+                raise PermissionError('synthetic locked ZIP')
+            return unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'unlink', deny_archive):
+            first = self.store.expire_indexes(CUTOFF)
+        self.assertEqual(observed, ['expired'])
+        self.assertTrue(first['deferred'], first)
+        self.assertEqual(first['deleted_archive_count'], 0)
+        self.assertEqual(self.archive_hash(identifier), original_hash)
+        self.assertTrue(plan.exists())
+        self.assertEqual(self.state(identifier)['state'], 'expired')
+        self.assertIsNone(self.store.maintenance_owner)
+        self.store.pool.shutdown(wait=True)
+        self.store = Store(self.root / 'data')
+        retry = self.store.expire_indexes(CUTOFF)
+        self.assertFalse(retry['deferred'], retry)
+        self.assertEqual(retry['deleted_archive_count'], 1)
+        self.assertEqual(retry['deleted_archive_bytes'], archive_size)
+        self.assertFalse(archive.exists())
+        self.assertFalse(plan.exists())
+        self.assertEqual(self.state(identifier)['state'], 'expired')
+        final = self.store.expire_indexes(CUTOFF)
+        self.assertEqual(final['expired_count'], 0)
+        self.assertFalse(final['compacted'], final)
+
+    def test_failed_and_review_unlink_retry_keeps_original_created_age(self):
+        for state in ('failed', 'review'):
+            with self.subTest(state=state):
+                identifier = self.imported(state + '-retry.zip')
+                archive = self.archive_path(identifier)
+                with self.store.connect() as db:
+                    # Failed/review rows age from creation, even if an old
+                    # attempt left a much newer completion timestamp behind.
+                    db.execute('UPDATE datasets SET state=?,created=?,completed_at=? WHERE id=?',
+                               (state, CUTOFF.isoformat(), NOW.isoformat(), identifier))
+                original_hash = self.archive_hash(identifier)
+                unlink = Path.unlink
+
+                def deny_archive(path, *args, **kwargs):
+                    if path == archive:
+                        raise PermissionError('synthetic locked ZIP')
+                    return unlink(path, *args, **kwargs)
+
+                with mock.patch.object(Path, 'unlink', deny_archive):
+                    first = self.store.expire_indexes(CUTOFF)
+                self.assertTrue(first['deferred'], first)
+                self.assertEqual(self.state(identifier)['state'], 'expired')
+                self.assertEqual(self.archive_hash(identifier), original_hash)
+                retry = self.store.expire_indexes(CUTOFF)
+                self.assertFalse(retry['deferred'], retry)
+                self.assertIn(identifier, retry['expired_ids'])
+                self.assertEqual(retry['deleted_archive_count'], 1)
+                self.assertFalse(archive.exists())
 
     def test_record_dataset_binding_rejects_cross_package_and_expired_evidence(self):
         old = self.imported('old-evidence.zip')
@@ -220,7 +344,7 @@ class IndexRetentionTests(unittest.TestCase):
         self.assertTrue(result['compacted'], result)
         self.assertLess(after, before // 3)
         self.assertGreater(result['reclaimed_bytes'], before // 2)
-        self.assertTrue((self.store.directory / 'archives' / (identifier + '.zip')).exists())
+        self.assertFalse(self.archive_path(identifier).exists())
 
     def test_unique_segmented_fts_postings_are_reclaimed_for_both_index_generations(self):
         # Repeating one line does not expose FTS tombstone/segment growth.
@@ -277,6 +401,7 @@ class IndexRetentionTests(unittest.TestCase):
     def test_busy_and_open_connection_defer_without_deleting_any_rows(self):
         identifier = self.imported()
         self.age(identifier)
+        original_hash = self.archive_hash(identifier)
         for mode in ('ai', 'connection'):
             with self.subTest(mode=mode):
                 if mode == 'ai':
@@ -286,6 +411,8 @@ class IndexRetentionTests(unittest.TestCase):
                         result = self.store.expire_indexes(CUTOFF)
                 self.assertTrue(result['deferred'], result)
                 self.assertEqual(result['expired_count'], 0)
+                self.assertEqual(result['deleted_archive_count'], 0)
+                self.assertEqual(self.archive_hash(identifier), original_hash)
                 self.assertEqual(self.state(identifier)['state'], 'ready')
                 self.assertIsNone(self.store.maintenance_owner)
         self.assertEqual(self.store.connections, 0)
@@ -294,11 +421,13 @@ class IndexRetentionTests(unittest.TestCase):
     def test_queued_import_and_delete_defer_maintenance(self):
         identifier = self.imported()
         self.age(identifier)
-        for state in ('importing', 'deleting'):
+        original_hash = self.archive_hash(identifier)
+        for state in ('scanning', 'importing', 'deleting'):
             with self.store.connect() as db:
                 db.execute("INSERT INTO datasets(id,name,state,created) VALUES('queued','queued.zip',?,?)", (state, CUTOFF.isoformat()))
             result = self.store.expire_indexes(CUTOFF)
             self.assertTrue(result['deferred'], result)
+            self.assertEqual(self.archive_hash(identifier), original_hash)
             self.assertEqual(self.state(identifier)['state'], 'ready')
             self.assertIsNone(self.store.maintenance_owner)
             with self.store.connect() as db:
@@ -307,7 +436,6 @@ class IndexRetentionTests(unittest.TestCase):
     def test_disk_shortage_commits_expiry_and_retries_compaction_after_restart(self):
         identifier = self.imported()
         self.age(identifier)
-        original_hash = self.archive_hash(identifier)
         real_usage = shutil.disk_usage(self.store.directory)
         with mock.patch('index_retention.shutil.disk_usage', return_value=real_usage._replace(free=0)):
             result = self.store.expire_indexes(CUTOFF)
@@ -315,7 +443,7 @@ class IndexRetentionTests(unittest.TestCase):
         self.assertEqual(result['expired_count'], 1)
         self.assertFalse(result['compacted'])
         self.assertEqual(self.state(identifier)['state'], 'expired')
-        self.assertEqual(self.archive_hash(identifier), original_hash)
+        self.assertFalse(self.archive_path(identifier).exists())
         self.store.pool.shutdown(wait=True)
         self.store = Store(self.root / 'data')
         self.assertEqual(self.state(identifier)['state'], 'expired')
@@ -355,7 +483,7 @@ class IndexRetentionTests(unittest.TestCase):
         self.assertEqual(self.store.connections, 0)
         self.assertIsNone(self.store.maintenance_owner)
 
-    def test_http_retention_status_and_expired_archive_download(self):
+    def test_http_retention_status_and_archive_download_before_expiry(self):
         # Scheduler tests exercise the background timer independently. Do not
         # let the wall clock race this endpoint's deliberately aged fixture.
         with mock.patch('app.RetentionManager.start'):
@@ -374,8 +502,6 @@ class IndexRetentionTests(unittest.TestCase):
             server.store.pool.submit(lambda: None).result(timeout=30)
             with server.store.connect() as db:
                 db.execute('UPDATE datasets SET completed_at=? WHERE id=?', (CUTOFF.isoformat(), identifier))
-            result = server.store.expire_indexes(CUTOFF)
-            self.assertEqual(result['expired_count'], 1)
             with urlopen(base + '/api/retention', timeout=10) as response:
                 status = json.load(response)
             self.assertTrue(status['enabled'])
@@ -386,6 +512,13 @@ class IndexRetentionTests(unittest.TestCase):
                 self.assertIn("filename*=UTF-8''" + quote(original_name, safe=''), response.headers['Content-Disposition'])
                 self.assertEqual(int(response.headers['Content-Length']), len(original_bytes))
                 self.assertEqual(response.read(), original_bytes)
+            result = server.store.expire_indexes(CUTOFF)
+            self.assertEqual(result['expired_count'], 1)
+            self.assertEqual(result['deleted_archive_count'], 1)
+            with self.assertRaises(HTTPError) as deleted:
+                urlopen(base + '/api/archives/download?dataset=' + identifier, timeout=10)
+            with deleted.exception as response:
+                self.assertEqual(response.code, 400)
             with self.assertRaises(HTTPError) as error:
                 urlopen(base + '/api/archives/download?dataset=../ai-config', timeout=10)
             with error.exception as response:
