@@ -59,7 +59,7 @@ class DeleteDatasetTests(unittest.TestCase):
                 finally:
                     self.api(base, '/api/chat/stop', {'id': session['id']})
                     model.gate.set()
-                    server.chats.pool.shutdown(wait=True)
+                    server.chats.close(wait=True)
                 self.assertFalse(server.chats.dataset_in_use(first))
                 status, _ = self.api(base, '/api/datasets/delete', {'dataset': first})
                 self.assertEqual(status, 202)
@@ -81,7 +81,7 @@ class DeleteDatasetTests(unittest.TestCase):
                 server.server_close()
                 thread.join()
                 server.store.pool.shutdown(wait=True)
-                server.chats.pool.shutdown(wait=True)
+                server.chats.close(wait=True)
                 server.chats.projects.pool.shutdown(wait=True)
                 model.close()
 
@@ -152,7 +152,7 @@ class DeleteDatasetTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=10)
                 server.store.pool.shutdown(wait=True)
-                server.chats.pool.shutdown(wait=True)
+                server.chats.close(wait=True)
                 server.chats.projects.pool.shutdown(wait=True)
 
     def test_explicit_compaction_delete_still_supported(self):

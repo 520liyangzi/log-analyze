@@ -58,7 +58,7 @@ class TerminalRemovalTests(unittest.TestCase):
                 server.server_close()
                 worker.join(timeout=10)
                 server.store.pool.shutdown(wait=True)
-                server.chats.pool.shutdown(wait=True)
+                server.chats.close(wait=True)
                 server.chats.projects.pool.shutdown(wait=True)
             for path, content in preserved.items():
                 self.assertEqual(path.read_bytes(), content, str(path))

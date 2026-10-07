@@ -39,7 +39,7 @@ class AnalysisTests(unittest.TestCase):
         cls.model.gate.set()
         cls.server.shutdown()
         cls.server.server_close()
-        cls.server.chats.pool.shutdown(wait=True)
+        cls.server.chats.close(wait=True)
         cls.server.chats.projects.pool.shutdown(wait=True)
         cls.thread.join()
         cls.model.close()

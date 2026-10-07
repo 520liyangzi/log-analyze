@@ -1,5 +1,4 @@
 """Persistent native investigations, independent of CLI terminals and provider sessions."""
-import concurrent.futures
 import contextlib
 import copy
 import datetime as dt
@@ -81,7 +80,8 @@ class ChatManager:
         self.lock = threading.RLock()
         self.active = {}
         self.previews = {}
-        self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        self.workers = set()
+        self.closed = False
         with self.db() as db:
             db.executescript('''CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS events(position INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,49 +226,61 @@ class ChatManager:
         request_id = str(body.get('request_id', ''))
         if not request_id or len(request_id) > 100:
             raise ValueError('缺少有效的请求标识')
-        with self.lock, self.db() as db:
-            previous = db.execute('SELECT session FROM requests WHERE id=?', (request_id,)).fetchone()
-            if previous:
-                return self._public(self._get(previous[0]))
-            draft = self.previews.get(str(body.get('preview_id', '')))
-            if not draft or time.monotonic() - draft['at'] > 1800:
-                raise ValueError('预览已过期，请重新预览')
-            config = self.config.load()
-            with self.store.connect() as logs:
-                self.store.require_ready(logs, draft['task']['dataset'])
-            if len(self.active) >= 3:
-                raise ValueError('已有 3 个排查任务运行中，请稍后提交')
-            identifier = draft['existing'] or uuid.uuid4().hex
-            if identifier in self.active:
-                raise ValueError('本会话正在分析，请停止或等待完成后再发送')
-            if draft['existing']:
-                session = self._get(identifier)
-                if session['updated'] != draft['expected_updated']:
-                    raise ValueError('其他页面已更新这个会话，请刷新并重新预览')
-                self._resume_partial(session)
-            else:
-                session = dict(id=identifier, title=draft['question'][:60], created=now(), wire=[],
-                               state='idle', status='', task=draft['task'])
-            directory = self.directory / identifier
-            directory.mkdir(exist_ok=True)
-            (directory / 'task.md').write_text(draft['text'], 'utf-8')
-            project_changed = session['task'].get('project') != draft['task'].get('project')
-            session.update(state='running', status='正在准备模型请求…', task=draft['task'],
-                           rules=draft['rules'], system=draft['system'])
-            content = draft['question']
-            if project_changed:
-                content += '\n\n本轮代码范围已由用户更新：' + dumps(draft['task'].get('project')) + '。历史证据属于原 commit，请勿混用。'
-            session['wire'].append(dict(role='user', content=content))
-            self._save(session)
-            db.execute('INSERT INTO requests VALUES (?,?)', (request_id, identifier))
-            self.previews.pop(str(body['preview_id']), None)
-            stop = threading.Event()
-            client = ModelClient(config, stop)
-            self.active[identifier] = dict(stop=stop, client=client)
-        self.event(identifier, 'user', dict(text=draft['question']))
-        self.event(identifier, 'scope', dict(text='使用已建立的日志索引；代码按固定 commit 只读查询。', task=draft['task']))
-        self.pool.submit(self._run, identifier, client, stop)
-        return self._public(session)
+        with self.lock:
+            if self.closed:
+                raise ValueError('服务正在关闭，暂时不能启动新的排查任务')
+            with self.db() as db:
+                previous = db.execute('SELECT session FROM requests WHERE id=?', (request_id,)).fetchone()
+                if previous:
+                    return self._public(self._get(previous[0]))
+                draft = self.previews.get(str(body.get('preview_id', '')))
+                if not draft or time.monotonic() - draft['at'] > 1800:
+                    raise ValueError('预览已过期，请重新预览')
+                config = self.config.load()
+                with self.store.connect() as logs:
+                    self.store.require_ready(logs, draft['task']['dataset'])
+                identifier = draft['existing'] or uuid.uuid4().hex
+                if identifier in self.active:
+                    raise ValueError('本会话正在分析，请停止或等待完成后再发送')
+                if draft['existing']:
+                    session = self._get(identifier)
+                    if session['updated'] != draft['expected_updated']:
+                        raise ValueError('其他页面已更新这个会话，请刷新并重新预览')
+                    self._resume_partial(session)
+                else:
+                    session = dict(id=identifier, title=draft['question'][:60], created=now(), wire=[],
+                                   state='idle', status='', task=draft['task'])
+                directory = self.directory / identifier
+                directory.mkdir(exist_ok=True)
+                (directory / 'task.md').write_text(draft['text'], 'utf-8')
+                project_changed = session['task'].get('project') != draft['task'].get('project')
+                session.update(state='running', status='正在准备模型请求…', task=draft['task'],
+                               rules=draft['rules'], system=draft['system'])
+                content = draft['question']
+                if project_changed:
+                    content += '\n\n本轮代码范围已由用户更新：' + dumps(draft['task'].get('project')) + '。历史证据属于原 commit，请勿混用。'
+                session['wire'].append(dict(role='user', content=content))
+                self._save(session)
+                db.execute('INSERT INTO requests VALUES (?,?)', (request_id, identifier))
+                self.previews.pop(str(body['preview_id']), None)
+                stop = threading.Event()
+                client = ModelClient(config, stop)
+                self.active[identifier] = dict(stop=stop, client=client)
+            self.event(identifier, 'user', dict(text=draft['question']))
+            self.event(identifier, 'scope', dict(text='使用已建立的日志索引；代码按固定 commit 只读查询。', task=draft['task']))
+            # One worker per active session: there is no fixed-size queue. Start
+            # while holding the lifecycle lock so close() cannot miss a worker.
+            worker = threading.Thread(target=self._worker, args=(identifier, client, stop),
+                                      name='logscope-chat-' + identifier[:8], daemon=False)
+            self.workers.add(worker)
+            try:
+                worker.start()
+            except RuntimeError as exc:
+                self.workers.discard(worker)
+                self.active.pop(identifier, None)
+                self._status(identifier, state='failed', status='无法启动排查任务，请检查本机可用资源后重试。')
+                raise ValueError('无法启动排查任务，请检查本机可用资源后重试。') from exc
+            return self._public(session)
 
     def _wire(self, identifier, messages):
         with self.lock:
@@ -339,6 +351,13 @@ class ChatManager:
         if len(dumps(result)) > 26000:
             return dict(truncated=True, note='结果超过本次传输预算，请缩小读取范围；不能将截断视为无结果。', excerpt=dumps(result)[:24000])
         return result
+
+    def _worker(self, identifier, client, stop):
+        try:
+            self._run(identifier, client, stop)
+        finally:
+            with self.lock:
+                self.workers.discard(threading.current_thread())
 
     def _run(self, identifier, client, stop):
         session = self._get(identifier)
@@ -470,10 +489,17 @@ class ChatManager:
         with self.lock:
             return any(self._get(s)['task']['dataset'] == identifier for s in self.active)
 
-    def close(self):
+    def close(self, wait=False):
         with self.lock:
+            self.closed = True
             active = list(self.active.values())
+            workers = list(self.workers)
+            for item in active:
+                item['stop'].set()
         for item in active:
             item['client'].cancel()
-        self.pool.shutdown(wait=False, cancel_futures=True)
         self.projects.close()
+        if wait:
+            for worker in workers:
+                if worker is not threading.current_thread():
+                    worker.join()

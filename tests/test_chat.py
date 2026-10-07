@@ -136,8 +136,7 @@ class NativeChatTests(unittest.TestCase):
 
     def tearDown(self):
         self.model.gate.set()
-        self.chat.close()
-        self.chat.pool.shutdown(wait=True)
+        self.chat.close(wait=True)
         self.chat.projects.pool.shutdown(wait=True)
         self.model.close()
         self.temp.cleanup()
@@ -237,6 +236,78 @@ class NativeChatTests(unittest.TestCase):
         self.wait(first['id'])
         with self.assertRaises(ValueError):
             self.send(b, 'stale-turn')
+
+    def start_parallel_investigations(self, count=6):
+        self.model.replies = ['wait'] * count
+        sessions = [self.send(self.preview(question='并行排查 ' + str(i)), 'parallel-' + str(i))
+                    for i in range(count)]
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            if len(self.model.requests) == count and all(
+                    any('已经收到的文字' in event['body'].get('text', '')
+                        for event in self.chat.get(session['id'])['events']) for session in sessions):
+                return sessions
+            time.sleep(.02)
+        self.fail('All investigations must reach the model concurrently, without a three-worker queue')
+
+    def test_six_investigations_run_concurrently_and_stop_independently(self):
+        sessions = self.start_parallel_investigations()
+        self.assertEqual(len(self.chat.active), 6)
+        self.assertTrue(self.chat.dataset_in_use(self.dataset))
+        with self.assertRaisesRegex(ValueError, '本会话正在分析'):
+            self.send(self.preview(id=sessions[1]['id']), 'parallel-duplicate-turn')
+        self.assertEqual(len(self.model.requests), 6)
+
+        self.chat.stop(sessions[0]['id'])
+        stopped = self.wait(sessions[0]['id'])
+        self.assertEqual(stopped['session']['state'], 'stopped')
+        self.assertTrue(any('已经收到的文字' in event['body'].get('text', '')
+                            for event in stopped['events']))
+        self.assertFalse(any(event['body'].get('streaming') for event in stopped['events']))
+        self.assertEqual(len(self.chat.active), 5)
+        self.assertTrue(self.chat.dataset_in_use(self.dataset))
+        for session in sessions[1:]:
+            self.assertEqual(self.chat.get(session['id'])['session']['state'], 'running')
+            with self.assertRaisesRegex(ValueError, '请先停止'):
+                self.chat.delete(session['id'])
+
+        self.model.gate.set()
+        for session in sessions[1:]:
+            self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
+            self.assertIn('最终输出', self.chat.report(session['id'])['text'])
+        self.assertEqual(self.chat.active, {})
+        self.assertFalse(self.chat.dataset_in_use(self.dataset))
+
+    def test_shutdown_cancels_all_parallel_tasks_and_rejects_new_work(self):
+        sessions = self.start_parallel_investigations()
+        draft = self.preview(question='关闭服务后不能开始的任务')
+        started = time.monotonic()
+        self.chat.close(wait=True)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(self.chat.active, {})
+        self.assertEqual(self.chat.workers, set())
+        self.assertFalse(self.chat.dataset_in_use(self.dataset))
+        for session in sessions:
+            result = self.chat.get(session['id'])
+            self.assertEqual(result['session']['state'], 'stopped')
+            self.assertFalse(any(event['body'].get('streaming') for event in result['events']))
+        with self.assertRaisesRegex(ValueError, '服务正在关闭'):
+            self.send(draft, 'after-shutdown')
+        self.assertEqual(len(self.chat.list()), 6)
+        self.chat.close(wait=True)
+
+    def test_worker_start_failure_releases_session_and_dataset(self):
+        draft = self.preview()
+        with mock.patch('chat_engine.threading.Thread.start', side_effect=RuntimeError('unavailable')):
+            with self.assertRaisesRegex(ValueError, '无法启动排查任务'):
+                self.send(draft, 'start-failed')
+        self.assertEqual(self.chat.active, {})
+        self.assertEqual(self.chat.workers, set())
+        self.assertFalse(self.chat.dataset_in_use(self.dataset))
+        session = self.chat.list()[0]
+        self.assertEqual(session['state'], 'failed')
+        self.send(self.preview(id=session['id']), 'start-retry')
+        self.assertEqual(self.wait(session['id'])['session']['state'], 'idle')
 
     def test_three_turn_followup_sends_prior_questions_answers_and_tool_evidence(self):
         self.model.replies = [response('先查日志', [('search_logs', dict(q='timeout'))]),
@@ -346,8 +417,7 @@ class NativeChatTests(unittest.TestCase):
         body.pop('interrupted', None)
         self.chat.event(session['id'], 'assistant', body, event['id'])
         self.chat._status(session['id'], state='running', status='正在接收回复')
-        self.chat.close()
-        self.chat.pool.shutdown(wait=True)
+        self.chat.close(wait=True)
         self.chat.projects.pool.shutdown(wait=True)
         self.chat = ChatManager(self.store)
         restored = self.chat.get(session['id'])
@@ -368,8 +438,7 @@ class NativeChatTests(unittest.TestCase):
         self.assertNotIn('tool_calls', messages[1])
 
         # Recovery bookkeeping must survive another process restart.
-        self.chat.close()
-        self.chat.pool.shutdown(wait=True)
+        self.chat.close(wait=True)
         self.chat.projects.pool.shutdown(wait=True)
         self.chat = ChatManager(self.store)
         self.model.replies = [response('继续已有历史')]

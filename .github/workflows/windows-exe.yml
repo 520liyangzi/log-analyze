@@ -29,6 +29,12 @@ jobs:
         run: |
           python tests/chat_browser_server.py &
           node tests/chat_browser.cjs
+      - name: Capture README screenshots with generated demo data
+        run: |
+          python tests/docs_screenshot_server.py > test-results/docs-screenshot-server.log 2>&1 &
+          fixture_pid=$!
+          trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
+          node tests/docs_screenshots.cjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
