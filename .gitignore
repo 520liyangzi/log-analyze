@@ -21,3 +21,6 @@ release/
 test-results/
 node_modules/
 *.exe
+
+# Public synthetic demo only; real log archives remain ignored.
+!docs/examples/demo-logs.zip
