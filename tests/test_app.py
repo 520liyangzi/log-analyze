@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import zipfile
@@ -174,6 +175,52 @@ class FailureTests(unittest.TestCase):
 
 
 class CollectorTests(unittest.TestCase):
+    def test_invalid_platform_addresses_reject_http_requests_without_starting_collection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / 'collect_logs.py'
+            script.write_text('raise RuntimeError("This fixture must never execute")', 'utf-8')
+            server = make_server(root / 'data', 0, collect_script=script)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = 'http://127.0.0.1:' + str(server.server_address[1])
+            def post(endpoint, body):
+                request = Request(base + endpoint, data=json.dumps(body).encode(),
+                                  headers={'Content-Type': 'application/json'})
+                return urlopen(request, timeout=10)
+            try:
+                with patch.object(server.collector.pool, 'submit') as start_worker:
+                    body = dict(pod='synthetic-pod', start='2026-09-10 14:00:00',
+                                end='2026-09-10 16:30:00', user='admin', password='synthetic-secret')
+                    config_before = server.collector_environments.path.read_bytes()
+                    for address in ('https://logs.example.test', 'https://logs.example.test:31945/',
+                                    'https://logs.example.test:65536'):
+                        for endpoint in ('/api/collector/environments', '/api/collector/start'):
+                            with self.subTest(address=address, endpoint=endpoint):
+                                with self.assertRaises(HTTPError) as failure:
+                                    post(endpoint, dict(body, name='测试环境', url=address))
+                                self.assertEqual(failure.exception.code, 400)
+                                error = json.load(failure.exception)['error']
+                                self.assertIn('端口', error)
+                                self.assertNotIn('synthetic-secret', error)
+                                self.assertEqual(server.collector.jobs, {})
+                                self.assertEqual(server.collector_environments.path.read_bytes(), config_before)
+                    # Old saved environments must also pass the new check before launching a script.
+                    server.collector_environments._write({'environments': [dict(id='legacy', name='旧环境',
+                        url='https://logs.example.test', user='admin', password='synthetic-secret')]})
+                    with self.assertRaises(HTTPError) as failure:
+                        post('/api/collector/start', dict(body, environment_id='legacy'))
+                    self.assertEqual(failure.exception.code, 400)
+                    self.assertIn('端口', json.load(failure.exception)['error'])
+                    self.assertEqual(server.collector.jobs, {})
+                    start_worker.assert_not_called()
+                    self.assertEqual(list(server.collector.directory.iterdir()), [])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+                server.store.pool.shutdown(wait=True)
+
     def test_collect_script_downloads_zip_and_imports_it(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);script=root/'collect_logs.py'
@@ -198,12 +245,12 @@ print('download complete password=' + str(a.password),flush=True)
                 self.assertTrue(api('/api/collector/capability')['available'])
                 for missing in ('url','user','password'):
                     body=dict(pod='order',start='2026-09-10 14:00:00',end='2026-09-10 16:30:00',
-                              url='https://logs.example.test',user='admin',password='test secret')
+                              url='https://logs.example.test:31945',user='admin',password='test secret')
                     body[missing]=''
                     with self.assertRaises(HTTPError) as error:
                         api('/api/collector/start',body)
                     self.assertEqual(error.exception.code,400)
-                environment=api('/api/collector/environments',dict(name='测试环境',url='https://logs.example.test',
+                environment=api('/api/collector/environments',dict(name='测试环境',url='https://logs.example.test:31945',
                                                                     user='admin',password='test secret'))
                 self.assertNotIn('password',environment)
                 self.assertNotIn('password',api('/api/collector/environments')[0])
@@ -232,7 +279,7 @@ print('download complete password=' + str(a.password),flush=True)
                 received=json.loads((root/'received.json').read_text('utf-8'))
                 self.assertEqual(received['pod'],'order;touch hacked')
                 self.assertEqual(received['start'],'2026-09-10 14:00:00')
-                self.assertEqual(received['url'],'https://logs.example.test')
+                self.assertEqual(received['url'],'https://logs.example.test:31945')
                 self.assertEqual(received['user'],'admin')
                 self.assertFalse((root/'hacked').exists())
             finally:

@@ -21,6 +21,8 @@ jobs:
         with:
           node-version: '22'
       - run: node --check dist/app.js
+      - run: node --check tests/collector_url_browser.cjs
+      - run: python -m py_compile platform_url.py
       - run: node --check dist/analysis-rules.js
       - run: node --check dist/chat.js
       - run: node --check dist/retention.js

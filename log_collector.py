@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 import zipfile
-from urllib.parse import urlsplit
+from platform_url import validate_platform_url
 from runtime_paths import FROZEN
 from index_retention import dataset_lifecycle
 
@@ -82,9 +82,7 @@ class LogCollector:
                 raise ValueError(f'请填写{label}')
             if len(options[key]) > maximum:
                 raise ValueError(f'{label}内容过长')
-        parsed_url = urlsplit(options['url'])
-        if parsed_url.scheme not in ('http', 'https') or not parsed_url.netloc:
-            raise ValueError('平台地址应为完整的 http:// 或 https:// 地址')
+        options['url'] = validate_platform_url(options['url'])
         timeout = int(body.get('timeout') or 300)
         poll = int(body.get('poll') or 5)
         if not 10 <= timeout <= 7200:

@@ -280,6 +280,38 @@ async function openContext(row) {
   } catch(error) { $('#contextBody').textContent=error.message; }
 }
 function openUpload() { $('#uploadDialog').showModal(); }
+function platformUrlError(raw){
+  const value=String(raw??'').trim(),example='https://192.0.2.10:31945';
+  const formatError='平台地址格式不正确，请填写 http:// 或 https://主机:端口，例如 '+example;
+  if(!value)return '请填写平台地址，例如 '+example;
+  if(value.length>2000)return '平台地址最多 2000 个字符';
+  if(/[\s\u0000-\u001f\u007f\\]/.test(value))return '平台地址中不能含空格、换行或反斜杠，例如 '+example;
+  if(!/^https?:\/\//i.test(value))return formatError;
+  const body=value.replace(/^https?:\/\//i,''),authority=body.split(/[/?#]/,1)[0],suffix=body.slice(authority.length);
+  if(authority.includes('@'))return '平台地址只填写协议、主机和端口；用户名和密码请填在各自的输入框中';
+  const address=authority.match(/^(\[[^\]]+\]|[^:\[\]]+)(?::(.*))?$/);
+  if(!address)return formatError;
+  if(!address[2])return '平台地址缺少端口，请在主机后补上实际端口，例如 '+example;
+  if(!/^[0-9]+$/.test(address[2])||Number(address[2])<1||Number(address[2])>65535)return '端口必须是 1–65535 之间的整数，例如 :31945';
+  try{const url=new URL(value);if(!url.hostname)return formatError;}
+  catch{return formatError;}
+  if(suffix==='/')return '平台地址末尾不要加 /，请删除端口后面的 /，例如 '+example;
+  if(suffix)return '平台地址只填写到端口，后面不要加 /、路径、查询参数或 #，例如 '+example;
+  return '';
+}
+function validatePlatformUrlField(input,{showEmpty=false,trim=false,focus=false}={}){
+  if(trim)input.value=input.value.trim();
+  let error=platformUrlError(input.value);
+  if(error&&input.id==='collectUrl'&&input.disabled)error+=' 请点击“管理环境”修改后再采集。';
+  const visible=Boolean(error&&(showEmpty||input.value.trim()));
+  input.setCustomValidity(error);input.setAttribute('aria-invalid',String(visible));
+  const message=$('#'+input.id+'Error');message.textContent=visible?error:'';message.hidden=!visible;
+  if(error&&focus){
+    if(input.disabled)$('#manageEnvironmentsFromCollect').focus();
+    else{input.focus();input.reportValidity();}
+  }
+  return !error;
+}
 function selectedCollectorEnvironment(){return collectorEnvironments.find(item=>item.id===$('#collectEnvironment').value);}
 function applyCollectorEnvironment(){
   const item=selectedCollectorEnvironment(),locked=Boolean(item);
@@ -287,6 +319,7 @@ function applyCollectorEnvironment(){
   for(const id of ['collectUrl','collectUser','collectPassword'])$('#'+id).disabled=locked;
   $('#collectPassword').required=!locked;
   $('#collectPassword').placeholder=locked?'已保存，采集时由本机服务安全读取':'请输入平台密码';
+  validatePlatformUrlField($('#collectUrl'),{showEmpty:locked});
   saveUI();
 }
 async function loadCollectorEnvironments(preferred){
@@ -300,6 +333,7 @@ function editEnvironment(item){
   $('#environmentId').value=item?.id||'';$('#environmentName').value=item?.name||'';
   $('#environmentUrl').value=item?.url||'';$('#environmentUser').value=item?.user||'';$('#environmentPassword').value='';
   $('#environmentPassword').required=!item;$('#deleteEnvironment').hidden=!item;
+  validatePlatformUrlField($('#environmentUrl'),{showEmpty:Boolean(item)});
   $('#environmentName').focus();
 }
 function renderEnvironmentList(){
@@ -366,6 +400,7 @@ async function pollCollection(identifier){
 }
 async function startCollection(){
   if($('#collectSubmit').disabled)return;
+  if(!validatePlatformUrlField($('#collectUrl'),{showEmpty:true,trim:true,focus:true}))return;
   const button=$('#collectSubmit');button.disabled=true;button.classList.add('is-loading');button.textContent='正在启动…';
   try{
     const result=await api('/api/collector/start',{environment_id:$('#collectEnvironment').value,pod:$('#collectPod').value,start:$('#collectStart').value,end:$('#collectEnd').value,
@@ -412,12 +447,19 @@ $('#dropzone').addEventListener('dragleave',()=>$('#dropzone').classList.remove(
 $('#dropzone').addEventListener('drop',e=>{e.preventDefault();$('#dropzone').classList.remove('dragging');chooseFile(e.dataTransfer.files[0]);$('#uploadFile').required=false;});
 $('#uploadForm').addEventListener('submit',e=>{e.preventDefault();upload(selectedFile);});
 $('#collectForm').addEventListener('submit',e=>{e.preventDefault();startCollection();});
+for(const id of ['collectUrl','environmentUrl']){
+  const input=$('#'+id);
+  input.addEventListener('input',()=>validatePlatformUrlField(input,{showEmpty:true}));
+  input.addEventListener('blur',()=>{validatePlatformUrlField(input,{showEmpty:true,trim:true});if(id==='collectUrl')saveUI();});
+  input.addEventListener('invalid',()=>validatePlatformUrlField(input,{showEmpty:true,trim:true}));
+}
 $('#collectEnvironment').addEventListener('change',applyCollectorEnvironment);
 for(const id of ['sideEnvironments','topEnvironments','manageEnvironmentsFromCollect'])$('#'+id).addEventListener('click',()=>{if(id==='manageEnvironmentsFromCollect')$('#collectDialog').close();openEnvironmentManager();});
 $('#newEnvironment').addEventListener('click',()=>editEnvironment(null));
 $('#environmentList').addEventListener('click',event=>{const button=event.target.closest('[data-environment-id]');if(button)editEnvironment(collectorEnvironments.find(item=>item.id===button.dataset.environmentId));});
 $('#environmentForm').addEventListener('submit',async event=>{
   event.preventDefault();
+  if(!validatePlatformUrlField($('#environmentUrl'),{showEmpty:true,trim:true,focus:true}))return;
   try{
     const saved=await api('/api/collector/environments',{id:$('#environmentId').value,name:$('#environmentName').value,url:$('#environmentUrl').value,user:$('#environmentUser').value,password:$('#environmentPassword').value});
     await loadCollectorEnvironments(saved.id);renderEnvironmentList();editEnvironment(saved);toast('采集环境已保存');

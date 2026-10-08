@@ -34,6 +34,12 @@ button.is-loading:disabled { cursor: wait; }
 #environmentForm { border-left:1px solid var(--border); padding-left:24px; }
 #environmentForm label+label { margin-top:15px; }
 #environmentForm .form-note { margin:14px 0; }
+.platform-url-hint,.platform-url-error { display:block; margin-top:7px; font-size:.74rem; line-height:1.55; font-weight:400; overflow-wrap:anywhere; }
+.platform-url-hint { color:#62738c; }
+.platform-url-error { color:#b32f45; }
+.platform-url-error[hidden] { display:none; }
+#collectUrl[aria-invalid="true"],#environmentUrl[aria-invalid="true"] { border-color:#c9485d; box-shadow:0 0 0 2px #c9485d14; }
+#collectUrl[aria-invalid="true"]:disabled { color:#9b3041; background:#fff6f7; opacity:1; }
 .environment-actions { display:flex; justify-content:flex-end; gap:12px; margin-top:20px; }
 @media(max-width:740px){.collect-environment-row{grid-template-columns:1fr;margin-inline:0}.environment-layout{grid-template-columns:1fr}.environment-list{min-height:160px;max-height:240px}#environmentForm{border-left:0;border-top:1px solid var(--border);padding:20px 0 0}}
 .collect-note { margin: -8px 0 20px; }

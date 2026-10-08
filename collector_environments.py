@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import threading
 import uuid
-from urllib.parse import urlsplit
+from platform_url import validate_platform_url
 
 
 class CollectorEnvironments:
@@ -47,14 +47,11 @@ class CollectorEnvironments:
     def save(self, body):
         identifier = str(body.get('id', '')).strip()
         name = str(body.get('name', '')).strip()
-        url = str(body.get('url', '')).strip()
+        url = validate_platform_url(body.get('url', ''))
         user = str(body.get('user', '')).strip()
         password = str(body.get('password', ''))
         if not name or len(name) > 80:
             raise ValueError('环境名称不能为空且最多 80 个字符')
-        parsed = urlsplit(url)
-        if parsed.scheme not in ('http', 'https') or not parsed.netloc or len(url) > 2000:
-            raise ValueError('平台地址应为完整的 http:// 或 https:// 地址')
         if not user or len(user) > 500 or len(password) > 2000:
             raise ValueError('用户名不能为空且最多 500 字符，密码最多 2000 字符')
         with self.lock:
